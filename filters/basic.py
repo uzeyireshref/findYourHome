@@ -45,7 +45,7 @@ def _listing_text(listing: ListingModel) -> str:
 def _detect_furnished(text: str):
     normalized = _normalize_text(text)
 
-    if any(token in normalized for token in ("esyasiz", "esya yok", "mobilyasiz")):
+    if any(token in normalized for token in ("esyali degil", "esyasiz", "esya yok", "mobilyasiz")):
         return False
     if any(token in normalized for token in ("esyali", "mobilyali", "full esya", "esya dahil")):
         return True

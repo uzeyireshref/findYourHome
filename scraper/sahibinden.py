@@ -20,6 +20,7 @@ HEADERS = {
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+NO_PROXY = {"http": "", "https": "", "all": ""}
 
 _TR_TRANSLATION = str.maketrans({
     "\u00c7": "c", "\u00e7": "c",
@@ -68,7 +69,7 @@ def _parse_price(text: str) -> float:
 def _detect_furnished(text: str):
     normalized = _normalize_text(text)
 
-    if any(token in normalized for token in ("esyasiz", "esya yok", "mobilyasiz")):
+    if any(token in normalized for token in ("esyali degil", "esyasiz", "esya yok", "mobilyasiz")):
         return False
     if any(token in normalized for token in ("esyali", "mobilyali", "full esya", "esya dahil")):
         return True
@@ -219,6 +220,83 @@ def _parse_hepsiemlak_cards(
     return listings
 
 
+def _value_after_label(text: str, label: str) -> str:
+    match = re.search(
+        rf"{re.escape(label)}\s*\|?\s*([^|]+)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _enrich_hepsiemlak_details_sync(listings: list[ListingModel]) -> list[ListingModel]:
+    from curl_cffi import requests as cr
+
+    session = cr.Session(impersonate="chrome", trust_env=False)
+    enriched = []
+
+    for listing in listings[:30]:
+        needs_detail = not listing.room_count or listing.is_furnished is None or listing.seller_type is None
+        if not needs_detail:
+            enriched.append(listing)
+            continue
+
+        try:
+            response = session.get(listing.url, headers=HEADERS, proxies=NO_PROXY, timeout=15)
+            if response.status_code != 200:
+                logging.warning("Hepsiemlak detay HTTP %s (%s)", response.status_code, listing.url)
+                enriched.append(listing)
+                continue
+        except Exception as e:
+            logging.warning("Hepsiemlak detay istek hatasi (%s): %s", listing.url, e)
+            enriched.append(listing)
+            continue
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        detail_text = soup.get_text(" | ", strip=True)
+
+        title = listing.title
+        if _normalize_text(title) in {"daire", "residence", "villa", "mustakil ev"}:
+            title_candidate = detail_text.split("|", 1)[0].strip()
+            title = re.sub(r"\s+\d{3,}-\d+\s*$", "", title_candidate).strip() or title
+
+        room_count = listing.room_count
+        if not room_count:
+            room_value = _value_after_label(detail_text, "Oda Sayısı")
+            room_match = re.search(r"(\d+(?:,\d+)?\s*\+\s*\d)", room_value or detail_text)
+            room_count = re.sub(r"\s+", "", room_match.group(1)) if room_match else room_count
+
+        is_furnished = listing.is_furnished
+        if is_furnished is None:
+            furniture_value = _value_after_label(detail_text, "Eşya Durumu")
+            is_furnished = _detect_furnished(furniture_value) if furniture_value else None
+
+        seller_type = listing.seller_type
+        if seller_type is None:
+            seller_value = _value_after_label(detail_text, "Kimden")
+            seller_type = _detect_seller_type(seller_value) if seller_value else _detect_seller_type(listing.title)
+            authorized_office = _value_after_label(detail_text, "Yetkili Ofis")
+            if seller_type is None and _normalize_text(authorized_office) == "evet":
+                seller_type = "emlak"
+
+        enriched.append(
+            listing.model_copy(
+                update={
+                    "title": title,
+                    "room_count": room_count,
+                    "is_furnished": is_furnished,
+                    "seller_type": seller_type,
+                    "description": detail_text[:1000],
+                }
+            )
+        )
+
+    if len(listings) > 30:
+        enriched.extend(listings[30:])
+
+    return enriched
+
+
 async def _fetch_emlakjet(
     city: str,
     district: str,
@@ -310,11 +388,11 @@ async def _fetch_emlakjet(
 def _fetch_hepsiemlak_sync(urls: list[str]) -> str:
     from curl_cffi import requests as cr
 
-    session = cr.Session(impersonate="chrome")
+    session = cr.Session(impersonate="chrome", trust_env=False)
     for url in urls:
         for attempt in range(1, 4):
             try:
-                response = session.get(url, headers=HEADERS, timeout=20)
+                response = session.get(url, headers=HEADERS, proxies=NO_PROXY, timeout=20)
                 if response.status_code == 200:
                     logging.info("Hepsiemlak cevap verdi: %s", url)
                     return response.text
@@ -355,6 +433,7 @@ async def _fetch_hepsiemlak(
 
     soup = BeautifulSoup(html, "html.parser")
     listings = _parse_hepsiemlak_cards(soup, source_prefix="he", base_url="https://www.hepsiemlak.com")
+    listings = await asyncio.to_thread(_enrich_hepsiemlak_details_sync, listings)
 
     logging.info("Hepsiemlak'tan %s ilan bulundu.", len(listings))
     return listings
