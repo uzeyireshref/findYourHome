@@ -61,6 +61,15 @@ def _hepsiemlak_proxies() -> dict[str, str]:
         return NO_PROXY
     return {"http": proxy, "https": proxy, "all": proxy}
 
+
+def _brightdata_unlocker_config() -> tuple[str, str]:
+    api_key = (
+        os.getenv("BRIGHTDATA_API_KEY", "").strip()
+        or os.getenv("BRIGHTDATA_UNLOCKER_API_KEY", "").strip()
+    )
+    zone = os.getenv("BRIGHTDATA_UNLOCKER_ZONE", "web_unlocker1").strip()
+    return api_key, zone
+
 _TR_TRANSLATION = str.maketrans({
     "\u00c7": "c", "\u00e7": "c",
     "\u011e": "g", "\u011f": "g",
@@ -509,6 +518,55 @@ async def _fetch_hepsiemlak_httpx_fallback(urls: list[str]) -> str:
     return ""
 
 
+async def _fetch_hepsiemlak_unlocker_api(urls: list[str]) -> str:
+    api_key, zone = _brightdata_unlocker_config()
+    if not api_key:
+        return ""
+
+    async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
+        for url in urls:
+            try:
+                response = await client.post(
+                    "https://api.brightdata.com/request",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "zone": zone,
+                        "url": url,
+                        "format": "raw",
+                    },
+                )
+                body_size = len(response.text or "")
+                logging.info(
+                    "Hepsiemlak Bright Data Unlocker: status=%s bytes=%s zone=%s url=%s",
+                    response.status_code,
+                    body_size,
+                    zone,
+                    url,
+                )
+
+                if response.status_code == 200 and body_size > 50_000:
+                    _set_hepsiemlak_status("ok")
+                    return response.text
+
+                if response.status_code in {401, 403}:
+                    _set_hepsiemlak_status(
+                        "unlocker_auth_error",
+                        "Bright Data Unlocker API key veya zone yetkisi reddedildi.",
+                    )
+                elif response.status_code == 429:
+                    _set_hepsiemlak_status(
+                        "unlocker_rate_limited",
+                        "Bright Data Unlocker limit/rate-limit verdi.",
+                    )
+            except Exception as e:
+                logging.warning("Hepsiemlak Bright Data Unlocker hatasi (%s): %s", url, e)
+
+    return ""
+
+
 async def _fetch_hepsiemlak(
     city: str,
     district: str,
@@ -527,8 +585,16 @@ async def _fetch_hepsiemlak(
 
     logging.info("Hepsiemlak taraniyor: %s", ", ".join(urls))
 
+    html = await _fetch_hepsiemlak_unlocker_api(urls)
+
+    if html:
+        logging.info("Hepsiemlak Bright Data Unlocker ile HTML alindi.")
+    else:
+        logging.info("Hepsiemlak Bright Data Unlocker kullanilamadi/bos dondu; native proxy deneniyor.")
+
     try:
-        html = await asyncio.to_thread(_fetch_hepsiemlak_sync, urls)
+        if not html:
+            html = await asyncio.to_thread(_fetch_hepsiemlak_sync, urls)
     except Exception as e:
         logging.error("Hepsiemlak hatasi: %s", e)
         html = ""
