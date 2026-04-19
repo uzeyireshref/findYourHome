@@ -316,8 +316,9 @@ async def _fetch_hepsiemlak(
     max_price: float = None,
 ) -> list[ListingModel]:
     slug = _normalize_slug(district or city)
-    property_segment = _hepsiemlak_property_segment(property_type)
-    url = f"https://www.hepsiemlak.com/{slug}-{listing_type}/{property_segment}"
+    # Hepsiemlak currently returns reliable listing cards on the broad URL.
+    # More specific paths like /daire can return 404/empty results for some districts.
+    url = f"https://www.hepsiemlak.com/{slug}-{listing_type}"
 
     logging.info("Hepsiemlak taraniyor: %s", url)
 
