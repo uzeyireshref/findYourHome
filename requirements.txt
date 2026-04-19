@@ -1,0 +1,11 @@
+python-telegram-bot[job-queue]
+httpx
+beautifulsoup4
+curl_cffi
+apscheduler
+SQLAlchemy
+aiosqlite
+asyncpg
+pydantic
+google-generativeai
+python-dotenv
