@@ -117,9 +117,9 @@ def _parse_price(text: str) -> float:
 def _detect_furnished(text: str):
     normalized = _normalize_text(text)
 
-    if any(token in normalized for token in ("esyali degil", "esyasiz", "esya yok", "mobilyasiz")):
+    if any(token in normalized for token in ("esyali degil", "esyasiz", "esya yok", "mobilyasiz", "bos")):
         return False
-    if any(token in normalized for token in ("esyali", "mobilyali", "full esya", "esya dahil")):
+    if any(token in normalized for token in ("esyali", "mobilyali", "full esya", "esya dahil", "ful esya")):
         return True
     return None
 
@@ -210,6 +210,63 @@ def _stable_id(prefix: str, value: str) -> str:
     return f"{prefix}_{digest}"
 
 
+def _parse_room_count(text: str) -> str:
+    match = re.search(r"(\d+(?:[,.]\d+)?\s*\+\s*\d+)", text or "")
+    return re.sub(r"\s+", "", match.group(1).replace(".", ",")) if match else ""
+
+
+def _parse_building_age(text: str) -> str:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return ""
+    if any(token in normalized for token in ("sifir", "yeni", "new")) or re.fullmatch(r"0(?:\s*-\s*5)?", normalized):
+        return "0"
+    match = re.search(r"\d+", normalized)
+    return match.group(0) if match else ""
+
+
+def _detail_tokens(text: str) -> list[str]:
+    return [token.strip() for token in (text or "").split("|") if token.strip()]
+
+
+def _value_after_any_label(text: str, labels: tuple[str, ...]) -> str:
+    tokens = _detail_tokens(text)
+    normalized_labels = {_normalize_text(label) for label in labels}
+
+    for index, token in enumerate(tokens[:-1]):
+        normalized_token = _normalize_text(token).rstrip(":")
+        if normalized_token in normalized_labels:
+            return tokens[index + 1].strip()
+
+    # Some pages render specs as "Label: value" instead of adjacent tokens.
+    for token in tokens:
+        normalized_token = _normalize_text(token)
+        for label in normalized_labels:
+            if normalized_token.startswith(f"{label}:"):
+                return token.split(":", 1)[1].strip()
+
+    return ""
+
+
+def _safe_detail_value(text: str, labels: tuple[str, ...]) -> str:
+    value = _value_after_any_label(text, labels)
+    normalized = _normalize_text(value)
+    if normalized in {"", "-", "belirtilmemis", "belirtilmedi", "yok"}:
+        return ""
+    return value
+
+
+ROOM_LABELS = ("Oda Sayısı", "Oda SayÄ±sÄ±", "Oda Sayisi")
+FURNITURE_LABELS = ("Eşya Durumu", "EÅŸya Durumu", "Esya Durumu")
+BUILDING_AGE_LABELS = ("Bina Yaşı", "Bina YaÅŸÄ±", "Bina Yasi")
+SELLER_LABELS = ("Kimden", "İlan Sahibi", "Ilan Sahibi")
+AUTHORIZED_OFFICE_LABELS = ("Yetkili Ofis",)
+
+
+def _value_after_label(text: str, label: str) -> str:
+    return _value_after_any_label(text, (label,))
+
+
 def _parse_hepsiemlak_cards(
     soup: BeautifulSoup,
     source_prefix: str = "he",
@@ -245,12 +302,9 @@ def _parse_hepsiemlak_cards(
         if not title:
             title = _title_from_url(full_url)
 
-        room_match = re.search(r"(\d+(?:,\d+)?\s*\+\s*\d)", size_text)
-        room_count = room_match.group(1) if room_match else ""
+        room_count = _parse_room_count(size_text)
         if not room_count:
-            room_match = re.search(r"(\d+(?:,\d+)?\s*\+\s*\d)", f"{title} {card_text}")
-            room_count = room_match.group(1) if room_match else ""
-        room_count = re.sub(r"\s+", "", room_count)
+            room_count = _parse_room_count(f"{title} {card_text}")
 
         detect_text = f"{title} {size_text} {card_text}"
 
@@ -266,15 +320,6 @@ def _parse_hepsiemlak_cards(
         ))
 
     return listings
-
-
-def _value_after_label(text: str, label: str) -> str:
-    match = re.search(
-        rf"{re.escape(label)}\s*\|?\s*([^|]+)",
-        text,
-        flags=re.IGNORECASE,
-    )
-    return match.group(1).strip() if match else ""
 
 
 def _enrich_hepsiemlak_details_sync(listings: list[ListingModel]) -> list[ListingModel]:
@@ -346,6 +391,166 @@ def _enrich_hepsiemlak_details_sync(listings: list[ListingModel]) -> list[Listin
     return enriched
 
 
+def _enrich_emlakjet_details_sync(listings: list[ListingModel]) -> list[ListingModel]:
+    enriched = []
+
+    with httpx.Client(follow_redirects=True, timeout=20.0, headers=HEADERS, trust_env=False) as client:
+        for listing in listings[:30]:
+            needs_detail = (
+                not listing.room_count
+                or listing.is_furnished is None
+                or listing.seller_type is None
+                or not listing.building_age
+                or not listing.district
+                or not listing.price
+            )
+            if not needs_detail:
+                enriched.append(listing)
+                continue
+
+            try:
+                response = client.get(listing.url)
+                if response.status_code != 200:
+                    logging.warning("Emlakjet detay HTTP %s (%s)", response.status_code, listing.url)
+                    enriched.append(listing)
+                    continue
+            except Exception as e:
+                logging.warning("Emlakjet detay istek hatasi (%s): %s", listing.url, e)
+                enriched.append(listing)
+                continue
+
+            soup = BeautifulSoup(response.text, "html.parser")
+            detail_text = soup.get_text(" | ", strip=True)
+
+            title = listing.title
+            title_candidate = soup.find("h1")
+            if title_candidate:
+                title = title_candidate.get_text(" ", strip=True) or title
+
+            room_value = _safe_detail_value(detail_text, ROOM_LABELS)
+            room_count = _parse_room_count(room_value) or listing.room_count or _parse_room_count(detail_text)
+
+            furniture_value = _safe_detail_value(detail_text, FURNITURE_LABELS)
+            is_furnished = listing.is_furnished
+            if furniture_value:
+                is_furnished = _detect_furnished(furniture_value)
+
+            building_age = listing.building_age
+            building_age_value = _safe_detail_value(detail_text, BUILDING_AGE_LABELS)
+            if building_age_value:
+                building_age = _parse_building_age(building_age_value) or building_age
+
+            seller_type = listing.seller_type
+            seller_value = _safe_detail_value(detail_text, SELLER_LABELS)
+            if seller_value:
+                seller_type = _detect_seller_type(seller_value) or seller_type
+
+            price = listing.price
+            if not price:
+                price_match = re.search(r"([\d.]{3,})\s*(?:TL|₺)", detail_text)
+                if price_match:
+                    price = _parse_price(price_match.group(1))
+
+            enriched.append(
+                listing.model_copy(
+                    update={
+                        "title": title,
+                        "price": price,
+                        "room_count": room_count,
+                        "building_age": building_age,
+                        "is_furnished": is_furnished,
+                        "seller_type": seller_type,
+                        "description": detail_text[:1000],
+                    }
+                )
+            )
+
+    if len(listings) > 30:
+        enriched.extend(listings[30:])
+
+    return enriched
+
+
+def _enrich_hepsiemlak_details_sync(listings: list[ListingModel]) -> list[ListingModel]:
+    from curl_cffi import requests as cr
+
+    session = cr.Session(impersonate="chrome", trust_env=False)
+    proxies = _hepsiemlak_proxies()
+    enriched = []
+
+    for listing in listings[:30]:
+        needs_detail = (
+            not listing.room_count
+            or listing.is_furnished is None
+            or listing.seller_type is None
+            or not listing.building_age
+        )
+        if not needs_detail:
+            enriched.append(listing)
+            continue
+
+        try:
+            response = session.get(listing.url, headers=HEPSIEMLAK_HEADERS, proxies=proxies, timeout=15)
+            if response.status_code != 200:
+                logging.warning("Hepsiemlak detay HTTP %s (%s)", response.status_code, listing.url)
+                enriched.append(listing)
+                continue
+        except Exception as e:
+            logging.warning("Hepsiemlak detay istek hatasi (%s): %s", listing.url, e)
+            enriched.append(listing)
+            continue
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        detail_text = soup.get_text(" | ", strip=True)
+
+        title = listing.title
+        h1 = soup.find("h1")
+        if h1:
+            title = h1.get_text(" ", strip=True) or title
+        elif _normalize_text(title) in {"daire", "residence", "villa", "mustakil ev"}:
+            title_candidate = detail_text.split("|", 1)[0].strip()
+            title = re.sub(r"\s+\d{3,}-\d+\s*$", "", title_candidate).strip() or title
+
+        room_value = _safe_detail_value(detail_text, ROOM_LABELS)
+        room_count = _parse_room_count(room_value) or listing.room_count or _parse_room_count(detail_text)
+
+        is_furnished = listing.is_furnished
+        furniture_value = _safe_detail_value(detail_text, FURNITURE_LABELS)
+        if furniture_value:
+            is_furnished = _detect_furnished(furniture_value)
+
+        building_age = listing.building_age
+        building_age_value = _safe_detail_value(detail_text, BUILDING_AGE_LABELS)
+        if building_age_value:
+            building_age = _parse_building_age(building_age_value) or building_age
+
+        seller_type = listing.seller_type
+        seller_value = _safe_detail_value(detail_text, SELLER_LABELS)
+        if seller_value:
+            seller_type = _detect_seller_type(seller_value) or seller_type
+        authorized_office = _safe_detail_value(detail_text, AUTHORIZED_OFFICE_LABELS)
+        if _normalize_text(authorized_office) == "evet":
+            seller_type = "emlak"
+
+        enriched.append(
+            listing.model_copy(
+                update={
+                    "title": title,
+                    "room_count": room_count,
+                    "building_age": building_age,
+                    "is_furnished": is_furnished,
+                    "seller_type": seller_type,
+                    "description": detail_text[:1000],
+                }
+            )
+        )
+
+    if len(listings) > 30:
+        enriched.extend(listings[30:])
+
+    return enriched
+
+
 async def _fetch_emlakjet(
     city: str,
     district: str,
@@ -397,8 +602,7 @@ async def _fetch_emlakjet(
         title_parts = card_text.split("|")
         title = title_parts[0].replace("YENI", "").replace("YEN\u0130", "").strip() if title_parts else ""
 
-        room_match = re.search(r"(\d\+\d)", card_text)
-        room_count = room_match.group(1) if room_match else ""
+        room_count = _parse_room_count(card_text)
 
         loc_parts = re.findall(
             r"(\w+(?:\s+\w+)*)\s*-\s*(\w+(?:\s+\w+)*\s*(?:Mahallesi)?)",
@@ -430,6 +634,7 @@ async def _fetch_emlakjet(
             seller_type=_detect_seller_type(detect_text),
         ))
 
+    listings = await asyncio.to_thread(_enrich_emlakjet_details_sync, listings)
     logging.info("Emlakjet'ten %s ilan bulundu.", len(listings))
     return listings
 

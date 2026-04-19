@@ -25,13 +25,14 @@ async def send_new_listing_notification(
 ):
     title = html.escape(listing.title or "Kiralık daire")
     district = html.escape(listing.district or "Bilinmiyor")
-    room = html.escape(listing.room_count or "?")
+    room = html.escape(listing.room_count or "Belirtilmemiş")
+    building_age = html.escape(listing.building_age or "Belirtilmemiş")
     source = html.escape(_listing_source(listing.listing_id))
     url = html.escape(listing.url)
     summary = html.escape(analysis_summary or "Detayları linkten kontrol edebilirsiniz.")
 
-    furnished = "Evet" if listing.is_furnished is True else "Hayır" if listing.is_furnished is False else "Belirsiz"
-    seller = html.escape(listing.seller_type.capitalize() if listing.seller_type else "Belirsiz")
+    furnished = "Evet" if listing.is_furnished is True else "Hayır" if listing.is_furnished is False else "Belirtilmemiş"
+    seller = html.escape(listing.seller_type.capitalize() if listing.seller_type else "Belirtilmemiş")
 
     message = (
         "🏠 <b>Uygun İlan</b>\n\n"
@@ -39,6 +40,7 @@ async def send_new_listing_notification(
         f"📍 <b>Konum:</b> {district}\n"
         f"💰 <b>Fiyat:</b> {_format_price(listing.price)}\n"
         f"🛏 <b>Oda:</b> {room}\n"
+        f"🏗 <b>Bina yaşı:</b> {building_age}\n"
         f"🛋 <b>Eşyalı:</b> {furnished}\n"
         f"👤 <b>Satıcı:</b> {seller}\n"
         f"🌐 <b>Kaynak:</b> {source}\n\n"

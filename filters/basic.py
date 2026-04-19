@@ -83,6 +83,26 @@ def _detect_seller_type(text: str):
     return None
 
 
+def _parse_room_number(value: str):
+    match = re.search(r"(\d+(?:[,.]\d+)?)\s*\+\s*\d+", value or "")
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _parse_building_age(value: str):
+    normalized = _normalize_text(value or "")
+    if not normalized:
+        return None
+    if any(token in normalized for token in ("sifir", "yeni")) or re.fullmatch(r"0(?:\s*-\s*5)?", normalized):
+        return 0
+    match = re.search(r"\d+", normalized)
+    return int(match.group(0)) if match else None
+
+
 def apply_basic_filters(listings: list[ListingModel], criteria: dict) -> list[ListingModel]:
     filtered = []
 
@@ -90,29 +110,42 @@ def apply_basic_filters(listings: list[ListingModel], criteria: dict) -> list[Li
     max_price = criteria.get("max_price")
     district = criteria.get("district")
     min_rooms = criteria.get("min_rooms")
+    max_rooms = criteria.get("max_rooms")
+    max_building_age = criteria.get("max_building_age")
     is_furnished = criteria.get("is_furnished")
     seller_type = criteria.get("seller_type")
 
     for listing in listings:
+        if (min_price or max_price) and not listing.price:
+            continue
+
         if min_price and listing.price < min_price:
             continue
 
         if max_price and listing.price > max_price:
             continue
 
-        if district and listing.district:
+        if district:
+            if not listing.district:
+                continue
             allowed_districts = [_normalize_text(d.strip()) for d in district.split(",")]
             listing_district = _normalize_text(listing.district)
             if not any(d and d in listing_district for d in allowed_districts):
                 continue
 
-        if min_rooms and listing.room_count:
-            try:
-                rooms = int(listing.room_count.split("+")[0])
-                if rooms < min_rooms:
-                    continue
-            except ValueError:
-                pass
+        if min_rooms or max_rooms:
+            rooms = _parse_room_number(listing.room_count or "")
+            if rooms is None:
+                continue
+            if min_rooms and rooms < float(min_rooms):
+                continue
+            if max_rooms and rooms > float(max_rooms):
+                continue
+
+        if max_building_age is not None:
+            building_age = _parse_building_age(listing.building_age or "")
+            if building_age is None or building_age > int(max_building_age):
+                continue
 
         listing_text = _listing_text(listing)
 
