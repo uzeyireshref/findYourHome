@@ -20,7 +20,31 @@ HEADERS = {
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+HEPSIEMLAK_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "Referer": "https://www.hepsiemlak.com/",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
 NO_PROXY = {"http": "", "https": "", "all": ""}
+
+
+def _hepsiemlak_proxies() -> dict[str, str]:
+    proxy = os.getenv("HEPSIEMLAK_PROXY", "").strip()
+    if not proxy:
+        return NO_PROXY
+    return {"http": proxy, "https": proxy, "all": proxy}
 
 _TR_TRANSLATION = str.maketrans({
     "\u00c7": "c", "\u00e7": "c",
@@ -233,6 +257,7 @@ def _enrich_hepsiemlak_details_sync(listings: list[ListingModel]) -> list[Listin
     from curl_cffi import requests as cr
 
     session = cr.Session(impersonate="chrome", trust_env=False)
+    proxies = _hepsiemlak_proxies()
     enriched = []
 
     for listing in listings[:30]:
@@ -242,7 +267,7 @@ def _enrich_hepsiemlak_details_sync(listings: list[ListingModel]) -> list[Listin
             continue
 
         try:
-            response = session.get(listing.url, headers=HEADERS, proxies=NO_PROXY, timeout=15)
+            response = session.get(listing.url, headers=HEPSIEMLAK_HEADERS, proxies=proxies, timeout=15)
             if response.status_code != 200:
                 logging.warning("Hepsiemlak detay HTTP %s (%s)", response.status_code, listing.url)
                 enriched.append(listing)
@@ -389,25 +414,49 @@ def _fetch_hepsiemlak_sync(urls: list[str]) -> str:
     from curl_cffi import requests as cr
 
     session = cr.Session(impersonate="chrome", trust_env=False)
-    for url in urls:
-        for attempt in range(1, 4):
-            try:
-                response = session.get(url, headers=HEADERS, proxies=NO_PROXY, timeout=20)
-                body_size = len(response.text or "")
-                logging.info(
-                    "Hepsiemlak curl denemesi: status=%s bytes=%s url=%s",
-                    response.status_code,
-                    body_size,
-                    url,
-                )
-                if response.status_code == 200:
-                    logging.info("Hepsiemlak cevap verdi: %s", url)
-                    return response.text
+    proxies = _hepsiemlak_proxies()
+    header_variants = [
+        HEPSIEMLAK_HEADERS,
+        {**HEPSIEMLAK_HEADERS, "Sec-Fetch-Site": "none"},
+        HEADERS,
+    ]
 
-                logging.warning("Hepsiemlak HTTP %s (%s)", response.status_code, url)
-                break
-            except Exception as e:
-                logging.warning("Hepsiemlak istek hatasi (%s/%s): %s", attempt, url, e)
+    try:
+        warmup = session.get(
+            "https://www.hepsiemlak.com/",
+            headers=HEPSIEMLAK_HEADERS,
+            proxies=proxies,
+            timeout=15,
+        )
+        logging.info(
+            "Hepsiemlak warmup: status=%s bytes=%s",
+            warmup.status_code,
+            len(warmup.text or ""),
+        )
+    except Exception as e:
+        logging.warning("Hepsiemlak warmup hatasi: %s", e)
+
+    for url in urls:
+        for headers in header_variants:
+            for attempt in range(1, 4):
+                try:
+                    response = session.get(url, headers=headers, proxies=proxies, timeout=20)
+                    body_size = len(response.text or "")
+                    logging.info(
+                        "Hepsiemlak curl denemesi: status=%s bytes=%s attempt=%s url=%s",
+                        response.status_code,
+                        body_size,
+                        attempt,
+                        url,
+                    )
+                    if response.status_code == 200:
+                        logging.info("Hepsiemlak cevap verdi: %s", url)
+                        return response.text
+
+                    logging.warning("Hepsiemlak HTTP %s (%s)", response.status_code, url)
+                    break
+                except Exception as e:
+                    logging.warning("Hepsiemlak istek hatasi (%s/%s): %s", attempt, url, e)
 
     return ""
 
