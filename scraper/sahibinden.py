@@ -393,6 +393,13 @@ def _fetch_hepsiemlak_sync(urls: list[str]) -> str:
         for attempt in range(1, 4):
             try:
                 response = session.get(url, headers=HEADERS, proxies=NO_PROXY, timeout=20)
+                body_size = len(response.text or "")
+                logging.info(
+                    "Hepsiemlak curl denemesi: status=%s bytes=%s url=%s",
+                    response.status_code,
+                    body_size,
+                    url,
+                )
                 if response.status_code == 200:
                     logging.info("Hepsiemlak cevap verdi: %s", url)
                     return response.text
@@ -401,6 +408,26 @@ def _fetch_hepsiemlak_sync(urls: list[str]) -> str:
                 break
             except Exception as e:
                 logging.warning("Hepsiemlak istek hatasi (%s/%s): %s", attempt, url, e)
+
+    return ""
+
+
+async def _fetch_hepsiemlak_httpx_fallback(urls: list[str]) -> str:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=25.0, trust_env=False) as client:
+        for url in urls:
+            try:
+                response = await client.get(url, headers=HEADERS)
+                body_size = len(response.text or "")
+                logging.info(
+                    "Hepsiemlak httpx fallback: status=%s bytes=%s url=%s",
+                    response.status_code,
+                    body_size,
+                    url,
+                )
+                if response.status_code == 200 and body_size > 50_000:
+                    return response.text
+            except Exception as e:
+                logging.warning("Hepsiemlak httpx fallback hatasi (%s): %s", url, e)
 
     return ""
 
@@ -426,13 +453,19 @@ async def _fetch_hepsiemlak(
         html = await asyncio.to_thread(_fetch_hepsiemlak_sync, urls)
     except Exception as e:
         logging.error("Hepsiemlak hatasi: %s", e)
-        return []
+        html = ""
 
     if not html:
+        logging.warning("Hepsiemlak curl ile bos dondu; httpx fallback deneniyor.")
+        html = await _fetch_hepsiemlak_httpx_fallback(urls)
+
+    if not html:
+        logging.error("Hepsiemlak HTML alinamadi: %s", ", ".join(urls))
         return []
 
     soup = BeautifulSoup(html, "html.parser")
     listings = _parse_hepsiemlak_cards(soup, source_prefix="he", base_url="https://www.hepsiemlak.com")
+    logging.info("Hepsiemlak kart parse sonucu: %s", len(listings))
     listings = await asyncio.to_thread(_enrich_hepsiemlak_details_sync, listings)
 
     logging.info("Hepsiemlak'tan %s ilan bulundu.", len(listings))
