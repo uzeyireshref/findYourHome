@@ -16,7 +16,7 @@ from db.database import AsyncSessionLocal
 from filters.basic import apply_basic_filters
 from gemini.criteria_parser import parse_user_request
 from notifications.sender import send_new_listing_notification
-from scraper.sahibinden import fetch_listings
+from scraper.sahibinden import fetch_listings, get_source_status
 
 MAX_INITIAL_LISTINGS = 10
 
@@ -159,6 +159,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         ej_count = len([l for l in listings if l.listing_id.startswith("ej_")])
         he_count = len([l for l in listings if l.listing_id.startswith("he_")])
+        hepsiemlak_status = get_source_status().get("hepsiemlak", {})
 
         filtered_listings = apply_basic_filters(listings, criteria)
         random.shuffle(filtered_listings)
@@ -178,10 +179,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         seen_preview_count = sum(1 for is_seen in seen_map.values() if is_seen)
 
+        hepsiemlak_line = (
+            f"• Hepsiemlak: <b>{he_count}</b> ilan çekildi → <b>{he_filtered}</b> uygun"
+        )
+        if he_count == 0 and hepsiemlak_status.get("state") == "blocked":
+            hepsiemlak_line = (
+                "• Hepsiemlak: <b>erişim engellendi</b> "
+                "(Google Cloud IP 403 alıyor)"
+            )
+
         stats_msg = (
             "📊 <b>Tarama özeti</b>\n\n"
             f"• Emlakjet: <b>{ej_count}</b> ilan çekildi → <b>{ej_filtered}</b> uygun\n"
-            f"• Hepsiemlak: <b>{he_count}</b> ilan çekildi → <b>{he_filtered}</b> uygun\n"
+            f"{hepsiemlak_line}\n"
             f"• Toplam: <b>{len(listings)}</b> ilan çekildi → <b>{len(filtered_listings)}</b> uygun\n"
             f"• Listelenecek: <b>{len(preview_listings)}</b> / {MAX_INITIAL_LISTINGS}\n"
             f"• Daha önce gösterilmiş: <b>{seen_preview_count}</b>"

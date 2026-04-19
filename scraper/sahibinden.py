@@ -39,6 +39,20 @@ HEPSIEMLAK_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 NO_PROXY = {"http": "", "https": "", "all": ""}
+SOURCE_STATUS = {
+    "hepsiemlak": {
+        "state": "unknown",
+        "message": "",
+    }
+}
+
+
+def _set_hepsiemlak_status(state: str, message: str = "") -> None:
+    SOURCE_STATUS["hepsiemlak"] = {"state": state, "message": message}
+
+
+def get_source_status() -> dict:
+    return SOURCE_STATUS.copy()
 
 
 def _hepsiemlak_proxies() -> dict[str, str]:
@@ -451,8 +465,15 @@ def _fetch_hepsiemlak_sync(urls: list[str]) -> str:
                         url,
                     )
                     if response.status_code == 200:
+                        _set_hepsiemlak_status("ok")
                         logging.info("Hepsiemlak cevap verdi: %s", url)
                         return response.text
+
+                    if response.status_code == 403:
+                        _set_hepsiemlak_status(
+                            "blocked",
+                            "Hepsiemlak Google Cloud VM IP adresinden gelen istekleri 403 ile engelliyor.",
+                        )
 
                     logging.warning("Hepsiemlak HTTP %s (%s)", response.status_code, url)
                     break
@@ -475,7 +496,13 @@ async def _fetch_hepsiemlak_httpx_fallback(urls: list[str]) -> str:
                     url,
                 )
                 if response.status_code == 200 and body_size > 50_000:
+                    _set_hepsiemlak_status("ok")
                     return response.text
+                if response.status_code == 403:
+                    _set_hepsiemlak_status(
+                        "blocked",
+                        "Hepsiemlak Google Cloud VM IP adresinden gelen istekleri 403 ile engelliyor.",
+                    )
             except Exception as e:
                 logging.warning("Hepsiemlak httpx fallback hatasi (%s): %s", url, e)
 
@@ -490,6 +517,7 @@ async def _fetch_hepsiemlak(
     min_price: float = None,
     max_price: float = None,
 ) -> list[ListingModel]:
+    _set_hepsiemlak_status("checking")
     slug = _normalize_slug(district or city)
     property_segment = _hepsiemlak_property_segment(property_type)
     urls = [
@@ -510,14 +538,20 @@ async def _fetch_hepsiemlak(
         html = await _fetch_hepsiemlak_httpx_fallback(urls)
 
     if not html:
+        if SOURCE_STATUS["hepsiemlak"]["state"] != "blocked":
+            _set_hepsiemlak_status("unavailable", "Hepsiemlak HTML alinamadi.")
         logging.error("Hepsiemlak HTML alinamadi: %s", ", ".join(urls))
         return []
 
     soup = BeautifulSoup(html, "html.parser")
     listings = _parse_hepsiemlak_cards(soup, source_prefix="he", base_url="https://www.hepsiemlak.com")
     logging.info("Hepsiemlak kart parse sonucu: %s", len(listings))
+    if not listings:
+        _set_hepsiemlak_status("parse_empty", "Hepsiemlak sayfasi acildi ama ilan karti parse edilemedi.")
     listings = await asyncio.to_thread(_enrich_hepsiemlak_details_sync, listings)
 
+    if listings:
+        _set_hepsiemlak_status("ok")
     logging.info("Hepsiemlak'tan %s ilan bulundu.", len(listings))
     return listings
 
