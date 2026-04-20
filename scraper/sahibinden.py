@@ -219,6 +219,83 @@ def _hepsiemlak_property_segment(property_type: str) -> str:
     return mapping.get(property_type, "daire")
 
 
+def _emlakjet_room_filter_values(criteria: dict | None) -> list[str]:
+    criteria = criteria or {}
+    min_rooms = criteria.get("min_rooms")
+    max_rooms = criteria.get("max_rooms")
+    if not min_rooms and not max_rooms:
+        return []
+
+    lower = int(float(min_rooms)) if min_rooms else 1
+    upper = int(float(max_rooms)) if max_rooms else 6
+    lower = max(1, lower)
+    upper = max(lower, min(upper, 6))
+
+    # Emlakjet URL filtrelerinde oda değerleri "2-1" => "2+1" formatında çalışıyor.
+    return [f"{room}-1" for room in range(lower, upper + 1)]
+
+
+def _emlakjet_search_url(base_url: str, criteria: dict | None) -> str:
+    criteria = criteria or {}
+    params: list[tuple[str, str]] = []
+
+    room_values = _emlakjet_room_filter_values(criteria)
+    furnished = criteria.get("is_furnished")
+
+    if furnished is True:
+        params.append(("filtreler", "esya-durumu=esyali"))
+        if room_values:
+            params.append(("oda-sayisi", ",".join(room_values)))
+    elif furnished is False:
+        params.append(("filtreler", "esya-durumu=bos"))
+        if room_values:
+            params.append(("oda-sayisi", ",".join(room_values)))
+    elif room_values:
+        params.append(("filtreler", f"oda-sayisi={','.join(room_values)}"))
+
+    min_price = criteria.get("min_price")
+    max_price = criteria.get("max_price")
+    if params:
+        if min_price:
+            params.append(("min-fiyat", str(int(float(min_price)))))
+        if max_price:
+            params.append(("max-fiyat", str(int(float(max_price)))))
+
+    return _add_query_params(base_url, params)
+
+
+def _hepsiemlak_room_query_values(criteria: dict | None) -> str:
+    values = _emlakjet_room_filter_values(criteria)
+    return ",".join(value.replace("-", "+") for value in values)
+
+
+def _hepsiemlak_search_url(base_url: str, criteria: dict | None) -> str:
+    criteria = criteria or {}
+    params: list[tuple[str, str]] = []
+
+    min_price = criteria.get("min_price")
+    max_price = criteria.get("max_price")
+    if min_price:
+        params.append(("priceMin", str(int(float(min_price)))))
+    if max_price:
+        params.append(("priceMax", str(int(float(max_price)))))
+
+    room_values = _hepsiemlak_room_query_values(criteria)
+    if room_values:
+        params.append(("roomCount", room_values))
+
+    if criteria.get("is_furnished") is True:
+        params.append(("furnished", "true"))
+    elif criteria.get("is_furnished") is False:
+        params.append(("furnished", "false"))
+
+    max_building_age = criteria.get("max_building_age")
+    if max_building_age is not None:
+        params.append(("buildingAgeMax", str(int(max_building_age))))
+
+    return _add_query_params(base_url, params)
+
+
 def _absolute_url(base_url: str, href: str) -> str:
     return urljoin(base_url, href)
 
@@ -227,8 +304,18 @@ def _with_page(url: str, page: int, page_param: str) -> str:
     if page <= 1:
         return url
     parts = urlsplit(url)
-    query = dict(parse_qsl(parts.query, keep_blank_values=True))
-    query[page_param] = str(page)
+    query = [(key, value) for key, value in parse_qsl(parts.query, keep_blank_values=True) if key != page_param]
+    query.append((page_param, str(page)))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _add_query_params(url: str, params: list[tuple[str, str]]) -> str:
+    if not params:
+        return url
+
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    query.extend((key, value) for key, value in params if value not in (None, ""))
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
@@ -307,6 +394,12 @@ FURNITURE_LABELS = ("Eşya Durumu", "EÅŸya Durumu", "Esya Durumu")
 BUILDING_AGE_LABELS = ("Bina Yaşı", "Binanın Yaşı", "Bina YaÅŸÄ±", "BinanÄ±n YaÅŸÄ±", "Bina Yasi", "Binanin Yasi")
 SELLER_LABELS = ("Kimden", "İlan Sahibi", "Ilan Sahibi")
 AUTHORIZED_OFFICE_LABELS = ("Yetkili Ofis",)
+
+# Keep correct Unicode labels in addition to older mojibake variants above.
+ROOM_LABELS = ("Oda Sayısı", *ROOM_LABELS)
+FURNITURE_LABELS = ("Eşya Durumu", *FURNITURE_LABELS)
+BUILDING_AGE_LABELS = ("Bina Yaşı", "Binanın Yaşı", *BUILDING_AGE_LABELS)
+SELLER_LABELS = ("İlan Sahibi", *SELLER_LABELS)
 
 
 def _value_after_label(text: str, label: str) -> str:
@@ -407,8 +500,6 @@ def _parse_hepsiemlak_cards(
             title = _title_from_url(full_url)
 
         room_count = _parse_room_count(size_text) or _parse_room_count(title)
-        detect_text = f"{title} {size_text}"
-
         listings.append(ListingModel(
             listing_id=listing_id,
             title=title,
@@ -416,7 +507,7 @@ def _parse_hepsiemlak_cards(
             district=location,
             room_count=room_count,
             url=full_url,
-            is_furnished=_detect_furnished(detect_text),
+            is_furnished=None,
             seller_type=None,
         ))
 
@@ -560,15 +651,6 @@ def _parse_emlakjet_listing_card(html: str) -> list[ListingModel]:
         title = str(record.get("title") or "").strip()
         full_url = _absolute_url("https://www.emlakjet.com", href)
         owner = record.get("owner") if isinstance(record.get("owner"), dict) else {}
-        detect_text = " ".join(
-            str(value or "")
-            for value in (
-                title,
-                record.get("estateTypeName"),
-                record.get("locationSummary"),
-                owner.get("name"),
-            )
-        )
 
         listings.append(
             ListingModel(
@@ -578,7 +660,7 @@ def _parse_emlakjet_listing_card(html: str) -> list[ListingModel]:
                 district=str(record.get("locationSummary") or ""),
                 room_count=room_count,
                 url=full_url,
-                is_furnished=_detect_furnished(detect_text),
+                is_furnished=None,
                 seller_type=_emlakjet_seller_type(record),
             )
         )
@@ -586,7 +668,7 @@ def _parse_emlakjet_listing_card(html: str) -> list[ListingModel]:
     return listings
 
 
-def _enrich_hepsiemlak_details_sync(listings: list[ListingModel], criteria: dict | None = None) -> list[ListingModel]:
+def _enrich_hepsiemlak_details_sync_legacy_unused(listings: list[ListingModel], criteria: dict | None = None) -> list[ListingModel]:
     from curl_cffi import requests as cr
 
     session = cr.Session(impersonate="chrome", trust_env=False)
@@ -838,6 +920,7 @@ async def _fetch_emlakjet(
     elif seller_type == "emlak":
         base_url = f"{base_url}/emlakcidan"
 
+    base_url = _emlakjet_search_url(base_url, criteria)
     logging.info("Emlakjet taraniyor: %s", base_url)
 
     listings = []
@@ -881,7 +964,7 @@ async def _fetch_emlakjet(
                                 district="",
                                 room_count=_parse_room_count(card_text),
                                 url=full_url,
-                                is_furnished=_detect_furnished(f"{card_text} {parent_text}"),
+                                is_furnished=None,
                                 seller_type=_detect_seller_type(f"{card_text} {parent_text}"),
                             )
                         )
@@ -1169,19 +1252,27 @@ async def _fetch_hepsiemlak(
     criteria: dict | None = None,
 ) -> list[ListingModel]:
     _set_hepsiemlak_status("checking")
-    slug = _normalize_slug(district or city)
+    city_slug = _normalize_slug(city)
+    district_slug = _normalize_slug(district) if district else ""
+    location_slug = f"{city_slug}-{district_slug}" if district_slug else city_slug
+    legacy_slug = district_slug or city_slug
     property_segment = _hepsiemlak_property_segment(property_type)
     seller_type = _normalize_text(str((criteria or {}).get("seller_type") or ""))
     seller_suffix = "-sahibinden" if seller_type == "sahibinden" else ""
     base_urls = [
-        f"https://www.hepsiemlak.com/{slug}-{listing_type}{seller_suffix}/{property_segment}",
-        f"https://www.hepsiemlak.com/{slug}-{listing_type}{seller_suffix}",
+        f"https://www.hepsiemlak.com/{location_slug}-{listing_type}{seller_suffix}/{property_segment}",
+        f"https://www.hepsiemlak.com/{listing_type}-konut/{location_slug}",
+        f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}{seller_suffix}/{property_segment}",
+        f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}{seller_suffix}",
     ]
     if seller_suffix:
         base_urls.extend([
-            f"https://www.hepsiemlak.com/{slug}-{listing_type}/{property_segment}",
-            f"https://www.hepsiemlak.com/{slug}-{listing_type}",
+            f"https://www.hepsiemlak.com/{location_slug}-{listing_type}/{property_segment}",
+            f"https://www.hepsiemlak.com/{listing_type}-konut/{location_slug}",
+            f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}/{property_segment}",
+            f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}",
         ])
+    base_urls = list(dict.fromkeys(_hepsiemlak_search_url(url, criteria) for url in base_urls))
     urls = [
         _with_page(base_url, page, "page")
         for base_url in base_urls
