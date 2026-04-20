@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import unicodedata
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -69,6 +69,22 @@ def _brightdata_unlocker_config() -> tuple[str, str]:
     )
     zone = os.getenv("BRIGHTDATA_UNLOCKER_ZONE", "web_unlocker1").strip()
     return api_key, zone
+
+
+def _env_int(name: str, default: int, minimum: int = 1, maximum: int = 10) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def _max_pages() -> int:
+    return _env_int("SCRAPER_MAX_PAGES", 5, minimum=1, maximum=10)
+
+
+def _detail_limit() -> int:
+    return _env_int("SCRAPER_DETAIL_LIMIT", 120, minimum=10, maximum=300)
 
 _TR_TRANSLATION = str.maketrans({
     "\u00c7": "c", "\u00e7": "c",
@@ -175,10 +191,21 @@ def _property_type(criteria: dict) -> str:
     return aliases.get(normalized, normalized or "daire")
 
 
-def _emlakjet_category_segment(listing_type: str) -> str:
+def _emlakjet_category_segment(listing_type: str, property_type: str) -> str:
+    property_mapping = {
+        "daire": "daire",
+        "villa": "villa",
+        "residence": "residence",
+        "mustakil-ev": "mustakil-ev",
+        "yazlik": "yazlik",
+    }
+    property_segment = property_mapping.get(property_type, "konut")
+
     if listing_type == "satilik":
-        return "satilik-konut"
-    return "kiralik-konut"
+        return f"satilik-{property_segment}"
+    if listing_type == "gunluk-kiralik":
+        return f"gunluk-kiralik-{property_segment}"
+    return f"kiralik-{property_segment}"
 
 
 def _hepsiemlak_property_segment(property_type: str) -> str:
@@ -194,6 +221,15 @@ def _hepsiemlak_property_segment(property_type: str) -> str:
 
 def _absolute_url(base_url: str, href: str) -> str:
     return urljoin(base_url, href)
+
+
+def _with_page(url: str, page: int, page_param: str) -> str:
+    if page <= 1:
+        return url
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query[page_param] = str(page)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
 
 
 def _title_from_url(url: str) -> str:
@@ -213,6 +249,16 @@ def _stable_id(prefix: str, value: str) -> str:
 def _parse_room_count(text: str) -> str:
     match = re.search(r"(\d+(?:[,.]\d+)?\s*\+\s*\d+)", text or "")
     return re.sub(r"\s+", "", match.group(1).replace(".", ",")) if match else ""
+
+
+def _room_number(value: str):
+    room_count = _parse_room_count(value)
+    if not room_count:
+        return None
+    try:
+        return float(room_count.split("+", 1)[0].replace(",", "."))
+    except ValueError:
+        return None
 
 
 def _parse_building_age(text: str) -> str:
@@ -258,13 +304,73 @@ def _safe_detail_value(text: str, labels: tuple[str, ...]) -> str:
 
 ROOM_LABELS = ("Oda Sayısı", "Oda SayÄ±sÄ±", "Oda Sayisi")
 FURNITURE_LABELS = ("Eşya Durumu", "EÅŸya Durumu", "Esya Durumu")
-BUILDING_AGE_LABELS = ("Bina Yaşı", "Bina YaÅŸÄ±", "Bina Yasi")
+BUILDING_AGE_LABELS = ("Bina Yaşı", "Binanın Yaşı", "Bina YaÅŸÄ±", "BinanÄ±n YaÅŸÄ±", "Bina Yasi", "Binanin Yasi")
 SELLER_LABELS = ("Kimden", "İlan Sahibi", "Ilan Sahibi")
 AUTHORIZED_OFFICE_LABELS = ("Yetkili Ofis",)
 
 
 def _value_after_label(text: str, label: str) -> str:
     return _value_after_any_label(text, (label,))
+
+
+def _criteria_maybe_matches(listing: ListingModel, criteria: dict | None) -> bool:
+    criteria = criteria or {}
+
+    min_price = criteria.get("min_price")
+    max_price = criteria.get("max_price")
+    if listing.price:
+        if min_price and listing.price < min_price:
+            return False
+        if max_price and listing.price > max_price:
+            return False
+
+    district = criteria.get("district")
+    if district and listing.district:
+        allowed_districts = [_normalize_text(d.strip()) for d in str(district).split(",") if d.strip()]
+        listing_district = _normalize_text(listing.district)
+        if allowed_districts and not any(d in listing_district for d in allowed_districts):
+            return False
+
+    room_number = _room_number(listing.room_count or "")
+    if room_number is not None:
+        min_rooms = criteria.get("min_rooms")
+        max_rooms = criteria.get("max_rooms")
+        if min_rooms and room_number < float(min_rooms):
+            return False
+        if max_rooms and room_number > float(max_rooms):
+            return False
+
+    if criteria.get("is_furnished") is not None and listing.is_furnished is not None:
+        if listing.is_furnished != criteria["is_furnished"]:
+            return False
+
+    expected_seller = _normalize_text(str(criteria.get("seller_type") or ""))
+    if expected_seller and listing.seller_type:
+        listing_seller = _normalize_text(listing.seller_type)
+        if expected_seller == "sahibinden" and listing_seller != "sahibinden":
+            return False
+        if expected_seller == "emlak" and listing_seller != "emlak":
+            return False
+
+    max_building_age = criteria.get("max_building_age")
+    if max_building_age is not None and listing.building_age:
+        building_age = _parse_building_age(listing.building_age)
+        if building_age and int(building_age) > int(max_building_age):
+            return False
+
+    return True
+
+
+def _needs_detail(listing: ListingModel, criteria: dict | None) -> bool:
+    criteria = criteria or {}
+    return (
+        ((criteria.get("min_price") or criteria.get("max_price")) and not listing.price)
+        or (criteria.get("district") and not listing.district)
+        or ((criteria.get("min_rooms") or criteria.get("max_rooms")) and not listing.room_count)
+        or criteria.get("is_furnished") is not None
+        or bool(criteria.get("seller_type") and not listing.seller_type)
+        or bool(criteria.get("max_building_age") is not None)
+    )
 
 
 def _parse_hepsiemlak_cards(
@@ -297,16 +403,11 @@ def _parse_hepsiemlak_cards(
 
         size_el = card_root.find(class_="list-view-size") or a_tag.find(class_="list-view-size")
         size_text = size_el.get_text(separator=" | ", strip=True) if size_el else ""
-        card_text = card_root.get_text(separator=" | ", strip=True)
-
         if not title:
             title = _title_from_url(full_url)
 
-        room_count = _parse_room_count(size_text)
-        if not room_count:
-            room_count = _parse_room_count(f"{title} {card_text}")
-
-        detect_text = f"{title} {size_text} {card_text}"
+        room_count = _parse_room_count(size_text) or _parse_room_count(title)
+        detect_text = f"{title} {size_text}"
 
         listings.append(ListingModel(
             listing_id=listing_id,
@@ -316,13 +417,176 @@ def _parse_hepsiemlak_cards(
             room_count=room_count,
             url=full_url,
             is_furnished=_detect_furnished(detect_text),
-            seller_type=_detect_seller_type(detect_text),
+            seller_type=None,
         ))
 
     return listings
 
 
-def _enrich_hepsiemlak_details_sync(listings: list[ListingModel]) -> list[ListingModel]:
+def _extract_json_object_after_marker(text: str, marker: str):
+    # Emlakjet renders listing data inside escaped React flight chunks.
+    normalized = (
+        (text or "")
+        .replace('\\"', '"')
+        .replace("\\u0026", "&")
+        .replace("\\/", "/")
+    )
+    marker_index = normalized.find(marker)
+    if marker_index == -1:
+        return None
+
+    start = normalized.find("{", marker_index)
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(normalized[start:], start):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    import json
+
+                    return json.loads(normalized[start:index + 1])
+                except ValueError:
+                    return None
+
+    return None
+
+
+def _quick_info_value(record: dict, key: str, label: str = "") -> str:
+    normalized_label = _normalize_text(label)
+    for item in record.get("quickInfos") or []:
+        if item.get("key") == key:
+            return str(item.get("value") or "")
+        if normalized_label and _normalize_text(str(item.get("name") or "")) == normalized_label:
+            return str(item.get("value") or "")
+    return ""
+
+
+def _emlakjet_seller_type(record: dict):
+    owner = record.get("owner") or {}
+    owner_type = _normalize_text(str(owner.get("type") or ""))
+    if owner_type in {"personal", "individual", "sahibinden"}:
+        return "sahibinden"
+    if owner_type in {"corporate", "company", "office", "emlak"}:
+        return "emlak"
+    return _detect_seller_type(str(owner.get("name") or ""))
+
+
+def _fetch_unlocker_html_sync(url: str, client: httpx.Client | None = None) -> str:
+    api_key, zone = _brightdata_unlocker_config()
+    if not api_key:
+        return ""
+
+    close_client = client is None
+    try:
+        if client is None:
+            client = httpx.Client(timeout=60.0, trust_env=False)
+        response = client.post(
+            "https://api.brightdata.com/request",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "zone": zone,
+                "url": url,
+                "format": "raw",
+            },
+        )
+        if response.status_code == 200 and response.text:
+            return response.text
+        logging.warning(
+            "Bright Data detay HTML alinamadi: status=%s bytes=%s url=%s",
+            response.status_code,
+            len(response.text or ""),
+            url,
+        )
+    except Exception as e:
+        logging.warning("Bright Data detay istek hatasi (%s): %s", url, e)
+    finally:
+        if close_client and client is not None:
+            client.close()
+
+    return ""
+
+
+def _parse_emlakjet_listing_card(html: str) -> list[ListingModel]:
+    listing_card = _extract_json_object_after_marker(html, '"listingCard":')
+    if not listing_card:
+        return []
+
+    listings = []
+    for record in listing_card.get("records") or []:
+        listing_id = str(record.get("id") or "")
+        href = str(record.get("url") or "")
+        if not listing_id or not href:
+            continue
+
+        price_detail = record.get("priceDetail") or {}
+        price = (
+            price_detail.get("tlPrice")
+            or price_detail.get("price")
+            or price_detail.get("firstPrice")
+            or 0
+        )
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
+            price = 0.0
+
+        room_count = (
+            _parse_room_count(str(record.get("roomCountName") or ""))
+            or _parse_room_count(_quick_info_value(record, "room_count", "Oda Sayısı"))
+            or _parse_room_count(str(record.get("title") or ""))
+        )
+
+        title = str(record.get("title") or "").strip()
+        full_url = _absolute_url("https://www.emlakjet.com", href)
+        owner = record.get("owner") if isinstance(record.get("owner"), dict) else {}
+        detect_text = " ".join(
+            str(value or "")
+            for value in (
+                title,
+                record.get("estateTypeName"),
+                record.get("locationSummary"),
+                owner.get("name"),
+            )
+        )
+
+        listings.append(
+            ListingModel(
+                listing_id=f"ej_{listing_id}",
+                title=title or _title_from_url(full_url),
+                price=price,
+                district=str(record.get("locationSummary") or ""),
+                room_count=room_count,
+                url=full_url,
+                is_furnished=_detect_furnished(detect_text),
+                seller_type=_emlakjet_seller_type(record),
+            )
+        )
+
+    return listings
+
+
+def _enrich_hepsiemlak_details_sync(listings: list[ListingModel], criteria: dict | None = None) -> list[ListingModel]:
     from curl_cffi import requests as cr
 
     session = cr.Session(impersonate="chrome", trust_env=False)
@@ -391,20 +655,13 @@ def _enrich_hepsiemlak_details_sync(listings: list[ListingModel]) -> list[Listin
     return enriched
 
 
-def _enrich_emlakjet_details_sync(listings: list[ListingModel]) -> list[ListingModel]:
+def _enrich_emlakjet_details_sync(listings: list[ListingModel], criteria: dict | None = None) -> list[ListingModel]:
     enriched = []
+    detail_limit = _detail_limit()
 
     with httpx.Client(follow_redirects=True, timeout=20.0, headers=HEADERS, trust_env=False) as client:
-        for listing in listings[:30]:
-            needs_detail = (
-                not listing.room_count
-                or listing.is_furnished is None
-                or listing.seller_type is None
-                or not listing.building_age
-                or not listing.district
-                or not listing.price
-            )
-            if not needs_detail:
+        for index, listing in enumerate(listings):
+            if index >= detail_limit or not _needs_detail(listing, criteria):
                 enriched.append(listing)
                 continue
 
@@ -428,12 +685,14 @@ def _enrich_emlakjet_details_sync(listings: list[ListingModel]) -> list[ListingM
                 title = title_candidate.get_text(" ", strip=True) or title
 
             room_value = _safe_detail_value(detail_text, ROOM_LABELS)
-            room_count = _parse_room_count(room_value) or listing.room_count or _parse_room_count(detail_text)
+            room_count = _parse_room_count(room_value) or listing.room_count
 
             furniture_value = _safe_detail_value(detail_text, FURNITURE_LABELS)
             is_furnished = listing.is_furnished
             if furniture_value:
                 is_furnished = _detect_furnished(furniture_value)
+            elif (criteria or {}).get("is_furnished") is not None:
+                is_furnished = None
 
             building_age = listing.building_age
             building_age_value = _safe_detail_value(detail_text, BUILDING_AGE_LABELS)
@@ -465,88 +724,92 @@ def _enrich_emlakjet_details_sync(listings: list[ListingModel]) -> list[ListingM
                 )
             )
 
-    if len(listings) > 30:
-        enriched.extend(listings[30:])
-
     return enriched
 
 
-def _enrich_hepsiemlak_details_sync(listings: list[ListingModel]) -> list[ListingModel]:
+def _enrich_hepsiemlak_details_sync(listings: list[ListingModel], criteria: dict | None = None) -> list[ListingModel]:
     from curl_cffi import requests as cr
 
     session = cr.Session(impersonate="chrome", trust_env=False)
     proxies = _hepsiemlak_proxies()
     enriched = []
+    detail_limit = _detail_limit()
+    unlocker_client = None
+    if _brightdata_unlocker_config()[0]:
+        unlocker_client = httpx.Client(timeout=60.0, trust_env=False)
 
-    for listing in listings[:30]:
-        needs_detail = (
-            not listing.room_count
-            or listing.is_furnished is None
-            or listing.seller_type is None
-            or not listing.building_age
-        )
-        if not needs_detail:
-            enriched.append(listing)
-            continue
-
-        try:
-            response = session.get(listing.url, headers=HEPSIEMLAK_HEADERS, proxies=proxies, timeout=15)
-            if response.status_code != 200:
-                logging.warning("Hepsiemlak detay HTTP %s (%s)", response.status_code, listing.url)
+    try:
+        for index, listing in enumerate(listings):
+            if index >= detail_limit or not _needs_detail(listing, criteria):
                 enriched.append(listing)
                 continue
-        except Exception as e:
-            logging.warning("Hepsiemlak detay istek hatasi (%s): %s", listing.url, e)
-            enriched.append(listing)
-            continue
 
-        soup = BeautifulSoup(response.text, "html.parser")
-        detail_text = soup.get_text(" | ", strip=True)
+            try:
+                html = _fetch_unlocker_html_sync(listing.url, unlocker_client)
+                if not html:
+                    response = session.get(listing.url, headers=HEPSIEMLAK_HEADERS, proxies=proxies, timeout=15)
+                    if response.status_code != 200:
+                        logging.warning("Hepsiemlak detay HTTP %s (%s)", response.status_code, listing.url)
+                        enriched.append(listing)
+                        continue
+                    html = response.text
+                if not html:
+                    enriched.append(listing)
+                    continue
+            except Exception as e:
+                logging.warning("Hepsiemlak detay istek hatasi (%s): %s", listing.url, e)
+                enriched.append(listing)
+                continue
 
-        title = listing.title
-        h1 = soup.find("h1")
-        if h1:
-            title = h1.get_text(" ", strip=True) or title
-        elif _normalize_text(title) in {"daire", "residence", "villa", "mustakil ev"}:
-            title_candidate = detail_text.split("|", 1)[0].strip()
-            title = re.sub(r"\s+\d{3,}-\d+\s*$", "", title_candidate).strip() or title
+            soup = BeautifulSoup(html, "html.parser")
+            detail_text = soup.get_text(" | ", strip=True)
 
-        room_value = _safe_detail_value(detail_text, ROOM_LABELS)
-        room_count = _parse_room_count(room_value) or listing.room_count or _parse_room_count(detail_text)
+            title = listing.title
+            h1 = soup.find("h1")
+            if h1:
+                title = h1.get_text(" ", strip=True) or title
+            elif _normalize_text(title) in {"daire", "residence", "villa", "mustakil ev"}:
+                title_candidate = detail_text.split("|", 1)[0].strip()
+                title = re.sub(r"\s+\d{3,}-\d+\s*$", "", title_candidate).strip() or title
 
-        is_furnished = listing.is_furnished
-        furniture_value = _safe_detail_value(detail_text, FURNITURE_LABELS)
-        if furniture_value:
-            is_furnished = _detect_furnished(furniture_value)
+            room_value = _safe_detail_value(detail_text, ROOM_LABELS)
+            room_count = _parse_room_count(room_value) or listing.room_count
 
-        building_age = listing.building_age
-        building_age_value = _safe_detail_value(detail_text, BUILDING_AGE_LABELS)
-        if building_age_value:
-            building_age = _parse_building_age(building_age_value) or building_age
+            is_furnished = listing.is_furnished
+            furniture_value = _safe_detail_value(detail_text, FURNITURE_LABELS)
+            if furniture_value:
+                is_furnished = _detect_furnished(furniture_value)
+            elif (criteria or {}).get("is_furnished") is not None:
+                is_furnished = None
 
-        seller_type = listing.seller_type
-        seller_value = _safe_detail_value(detail_text, SELLER_LABELS)
-        if seller_value:
-            seller_type = _detect_seller_type(seller_value) or seller_type
-        authorized_office = _safe_detail_value(detail_text, AUTHORIZED_OFFICE_LABELS)
-        if _normalize_text(authorized_office) == "evet":
-            seller_type = "emlak"
+            building_age = listing.building_age
+            building_age_value = _safe_detail_value(detail_text, BUILDING_AGE_LABELS)
+            if building_age_value:
+                building_age = _parse_building_age(building_age_value) or building_age
 
-        enriched.append(
-            listing.model_copy(
-                update={
-                    "title": title,
-                    "room_count": room_count,
-                    "building_age": building_age,
-                    "is_furnished": is_furnished,
-                    "seller_type": seller_type,
-                    "description": detail_text[:1000],
-                }
+            seller_type = listing.seller_type
+            seller_value = _safe_detail_value(detail_text, SELLER_LABELS)
+            if seller_value:
+                seller_type = _detect_seller_type(seller_value) or seller_type
+            authorized_office = _safe_detail_value(detail_text, AUTHORIZED_OFFICE_LABELS)
+            if _normalize_text(authorized_office) == "evet":
+                seller_type = "emlak"
+
+            enriched.append(
+                listing.model_copy(
+                    update={
+                        "title": title,
+                        "room_count": room_count,
+                        "building_age": building_age,
+                        "is_furnished": is_furnished,
+                        "seller_type": seller_type,
+                        "description": detail_text[:1000],
+                    }
+                )
             )
-        )
-
-    if len(listings) > 30:
-        enriched.extend(listings[30:])
+    finally:
+        if unlocker_client is not None:
+            unlocker_client.close()
 
     return enriched
 
@@ -558,83 +821,94 @@ async def _fetch_emlakjet(
     property_type: str = "daire",
     min_price: float = None,
     max_price: float = None,
+    criteria: dict | None = None,
 ) -> list[ListingModel]:
     city_slug = _normalize_slug(city)
-    category_segment = _emlakjet_category_segment(listing_type)
+    category_segment = _emlakjet_category_segment(listing_type, property_type)
 
     if district:
         district_slug = _normalize_slug(district)
-        url = f"https://www.emlakjet.com/{category_segment}/{city_slug}-{district_slug}/"
+        base_url = f"https://www.emlakjet.com/{category_segment}/{city_slug}-{district_slug}"
     else:
-        url = f"https://www.emlakjet.com/{category_segment}/{city_slug}/"
+        base_url = f"https://www.emlakjet.com/{category_segment}/{city_slug}"
 
-    logging.info("Emlakjet taraniyor: %s", url)
+    seller_type = _normalize_text(str((criteria or {}).get("seller_type") or ""))
+    if seller_type == "sahibinden":
+        base_url = f"{base_url}/sahibinden"
+    elif seller_type == "emlak":
+        base_url = f"{base_url}/emlakcidan"
+
+    logging.info("Emlakjet taraniyor: %s", base_url)
+
+    listings = []
+    seen_ids = set()
+    max_pages = _max_pages()
 
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as client:
-            response = await client.get(url, headers=HEADERS)
-            if response.status_code != 200:
-                logging.error("Emlakjet HTTP %s", response.status_code)
-                return []
+        async with httpx.AsyncClient(follow_redirects=True, timeout=20.0, trust_env=False) as client:
+            for page in range(1, max_pages + 1):
+                url = _with_page(base_url, page, "sayfa")
+                response = await client.get(url, headers=HEADERS)
+                if response.status_code != 200:
+                    logging.warning("Emlakjet HTTP %s (%s)", response.status_code, url)
+                    break
+
+                page_listings = _parse_emlakjet_listing_card(response.text)
+                if not page_listings:
+                    soup = BeautifulSoup(response.text, "html.parser")
+                    page_listings = []
+                    for a_tag in soup.find_all("a", href=True):
+                        href = a_tag.get("href", "")
+                        if "/ilan/" not in href:
+                            continue
+
+                        match = re.search(r"-(\d+)$", href)
+                        if not match:
+                            continue
+
+                        listing_id = match.group(1)
+                        card_text = a_tag.get_text(separator=" | ", strip=True)
+                        parent = a_tag.find_parent("div")
+                        parent_text = parent.get_text(" ", strip=True) if parent else ""
+                        price_match = re.search(r"([\d.]{3,})\s*(?:TL|\u20ba)", parent_text)
+                        full_url = _absolute_url("https://www.emlakjet.com", href)
+
+                        page_listings.append(
+                            ListingModel(
+                                listing_id=f"ej_{listing_id}",
+                                title=_title_from_url(full_url),
+                                price=_parse_price(price_match.group(1)) if price_match else 0.0,
+                                district="",
+                                room_count=_parse_room_count(card_text),
+                                url=full_url,
+                                is_furnished=_detect_furnished(f"{card_text} {parent_text}"),
+                                seller_type=_detect_seller_type(f"{card_text} {parent_text}"),
+                            )
+                        )
+
+                new_count = 0
+                for listing in page_listings:
+                    if listing.listing_id in seen_ids:
+                        continue
+                    seen_ids.add(listing.listing_id)
+                    if not _criteria_maybe_matches(listing, criteria):
+                        continue
+                    listings.append(listing)
+                    new_count += 1
+
+                logging.info(
+                    "Emlakjet sayfa %s: %s ilan parse edildi, %s aday eklendi.",
+                    page,
+                    len(page_listings),
+                    new_count,
+                )
+                if not page_listings:
+                    break
     except Exception as e:
         logging.error("Emlakjet istek hatasi: %s", e)
         return []
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    listings = []
-    seen_ids = set()
-
-    for a_tag in soup.find_all("a", href=True):
-        href = a_tag.get("href", "")
-        if "/ilan/" not in href:
-            continue
-
-        match = re.search(r"-(\d+)$", href)
-        if not match:
-            continue
-
-        listing_id = match.group(1)
-        if listing_id in seen_ids:
-            continue
-        seen_ids.add(listing_id)
-
-        card_text = a_tag.get_text(separator=" | ", strip=True)
-        title_parts = card_text.split("|")
-        title = title_parts[0].replace("YENI", "").replace("YEN\u0130", "").strip() if title_parts else ""
-
-        room_count = _parse_room_count(card_text)
-
-        loc_parts = re.findall(
-            r"(\w+(?:\s+\w+)*)\s*-\s*(\w+(?:\s+\w+)*\s*(?:Mahallesi)?)",
-            card_text,
-        )
-        location = f"{loc_parts[0][0]} - {loc_parts[0][1]}" if loc_parts else ""
-
-        price = 0.0
-        parent = a_tag.find_parent("div")
-        parent_text = parent.get_text(" ", strip=True) if parent else ""
-        if parent_text:
-            price_match = re.search(r"([\d.]{3,})\s*(?:TL|\u20ba)", parent_text)
-            if price_match:
-                price = _parse_price(price_match.group(1))
-
-        full_url = f"https://www.emlakjet.com{href}" if href.startswith("/") else href
-        if not title:
-            title = _title_from_url(full_url)
-        detect_text = f"{card_text} {parent_text}"
-
-        listings.append(ListingModel(
-            listing_id=f"ej_{listing_id}",
-            title=title,
-            price=price,
-            district=location,
-            room_count=room_count,
-            url=full_url,
-            is_furnished=_detect_furnished(detect_text),
-            seller_type=_detect_seller_type(detect_text),
-        ))
-
-    listings = await asyncio.to_thread(_enrich_emlakjet_details_sync, listings)
+    listings = await asyncio.to_thread(_enrich_emlakjet_details_sync, listings, criteria)
     logging.info("Emlakjet'ten %s ilan bulundu.", len(listings))
     return listings
 
@@ -772,6 +1046,119 @@ async def _fetch_hepsiemlak_unlocker_api(urls: list[str]) -> str:
     return ""
 
 
+def _fetch_hepsiemlak_sync_pages(urls: list[str]) -> list[str]:
+    from curl_cffi import requests as cr
+
+    session = cr.Session(impersonate="chrome", trust_env=False)
+    proxies = _hepsiemlak_proxies()
+    pages = []
+
+    try:
+        session.get(
+            "https://www.hepsiemlak.com/",
+            headers=HEPSIEMLAK_HEADERS,
+            proxies=proxies,
+            timeout=15,
+        )
+    except Exception as e:
+        logging.warning("Hepsiemlak warmup hatasi: %s", e)
+
+    for url in urls:
+        try:
+            response = session.get(url, headers=HEPSIEMLAK_HEADERS, proxies=proxies, timeout=20)
+            body_size = len(response.text or "")
+            logging.info(
+                "Hepsiemlak sayfa denemesi: status=%s bytes=%s url=%s",
+                response.status_code,
+                body_size,
+                url,
+            )
+            if response.status_code == 200 and body_size > 20_000:
+                pages.append(response.text)
+            elif response.status_code == 403:
+                _set_hepsiemlak_status(
+                    "blocked",
+                    "Hepsiemlak Google Cloud VM IP adresinden gelen istekleri 403 ile engelliyor.",
+                )
+        except Exception as e:
+            logging.warning("Hepsiemlak sayfa istek hatasi (%s): %s", url, e)
+
+    return pages
+
+
+async def _fetch_hepsiemlak_httpx_fallback_pages(urls: list[str]) -> list[str]:
+    pages = []
+    async with httpx.AsyncClient(follow_redirects=True, timeout=25.0, trust_env=False) as client:
+        for url in urls:
+            try:
+                response = await client.get(url, headers=HEADERS)
+                body_size = len(response.text or "")
+                logging.info(
+                    "Hepsiemlak httpx sayfa fallback: status=%s bytes=%s url=%s",
+                    response.status_code,
+                    body_size,
+                    url,
+                )
+                if response.status_code == 200 and body_size > 20_000:
+                    pages.append(response.text)
+                elif response.status_code == 403:
+                    _set_hepsiemlak_status(
+                        "blocked",
+                        "Hepsiemlak Google Cloud VM IP adresinden gelen istekleri 403 ile engelliyor.",
+                    )
+            except Exception as e:
+                logging.warning("Hepsiemlak httpx sayfa fallback hatasi (%s): %s", url, e)
+
+    return pages
+
+
+async def _fetch_hepsiemlak_unlocker_api_pages(urls: list[str]) -> list[str]:
+    api_key, zone = _brightdata_unlocker_config()
+    if not api_key:
+        return []
+
+    pages = []
+    async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
+        for url in urls:
+            try:
+                response = await client.post(
+                    "https://api.brightdata.com/request",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "zone": zone,
+                        "url": url,
+                        "format": "raw",
+                    },
+                )
+                body_size = len(response.text or "")
+                logging.info(
+                    "Hepsiemlak Unlocker sayfa: status=%s bytes=%s zone=%s url=%s",
+                    response.status_code,
+                    body_size,
+                    zone,
+                    url,
+                )
+                if response.status_code == 200 and body_size > 20_000:
+                    pages.append(response.text)
+                elif response.status_code in {401, 403}:
+                    _set_hepsiemlak_status(
+                        "unlocker_auth_error",
+                        "Bright Data Unlocker API key veya zone yetkisi reddedildi.",
+                    )
+                elif response.status_code == 429:
+                    _set_hepsiemlak_status(
+                        "unlocker_rate_limited",
+                        "Bright Data Unlocker limit/rate-limit verdi.",
+                    )
+            except Exception as e:
+                logging.warning("Hepsiemlak Unlocker sayfa hatasi (%s): %s", url, e)
+
+    return pages
+
+
 async def _fetch_hepsiemlak(
     city: str,
     district: str,
@@ -779,47 +1166,71 @@ async def _fetch_hepsiemlak(
     property_type: str = "daire",
     min_price: float = None,
     max_price: float = None,
+    criteria: dict | None = None,
 ) -> list[ListingModel]:
     _set_hepsiemlak_status("checking")
     slug = _normalize_slug(district or city)
     property_segment = _hepsiemlak_property_segment(property_type)
+    seller_type = _normalize_text(str((criteria or {}).get("seller_type") or ""))
+    seller_suffix = "-sahibinden" if seller_type == "sahibinden" else ""
+    base_urls = [
+        f"https://www.hepsiemlak.com/{slug}-{listing_type}{seller_suffix}/{property_segment}",
+        f"https://www.hepsiemlak.com/{slug}-{listing_type}{seller_suffix}",
+    ]
+    if seller_suffix:
+        base_urls.extend([
+            f"https://www.hepsiemlak.com/{slug}-{listing_type}/{property_segment}",
+            f"https://www.hepsiemlak.com/{slug}-{listing_type}",
+        ])
     urls = [
-        f"https://www.hepsiemlak.com/{slug}-{listing_type}/{property_segment}",
-        f"https://www.hepsiemlak.com/{slug}-{listing_type}",
+        _with_page(base_url, page, "page")
+        for base_url in base_urls
+        for page in range(1, _max_pages() + 1)
     ]
 
     logging.info("Hepsiemlak taraniyor: %s", ", ".join(urls))
 
-    html = await _fetch_hepsiemlak_unlocker_api(urls)
+    pages = await _fetch_hepsiemlak_unlocker_api_pages(urls)
 
-    if html:
-        logging.info("Hepsiemlak Bright Data Unlocker ile HTML alindi.")
+    if pages:
+        logging.info("Hepsiemlak Bright Data Unlocker ile %s sayfa alindi.", len(pages))
     else:
         logging.info("Hepsiemlak Bright Data Unlocker kullanilamadi/bos dondu; native proxy deneniyor.")
 
     try:
-        if not html:
-            html = await asyncio.to_thread(_fetch_hepsiemlak_sync, urls)
+        if not pages:
+            pages = await asyncio.to_thread(_fetch_hepsiemlak_sync_pages, urls)
     except Exception as e:
         logging.error("Hepsiemlak hatasi: %s", e)
-        html = ""
+        pages = []
 
-    if not html:
+    if not pages:
         logging.warning("Hepsiemlak curl ile bos dondu; httpx fallback deneniyor.")
-        html = await _fetch_hepsiemlak_httpx_fallback(urls)
+        pages = await _fetch_hepsiemlak_httpx_fallback_pages(urls)
 
-    if not html:
+    if not pages:
         if SOURCE_STATUS["hepsiemlak"]["state"] != "blocked":
             _set_hepsiemlak_status("unavailable", "Hepsiemlak HTML alinamadi.")
         logging.error("Hepsiemlak HTML alinamadi: %s", ", ".join(urls))
         return []
 
-    soup = BeautifulSoup(html, "html.parser")
-    listings = _parse_hepsiemlak_cards(soup, source_prefix="he", base_url="https://www.hepsiemlak.com")
+    listings = []
+    seen_ids = set()
+    for html in pages:
+        soup = BeautifulSoup(html, "html.parser")
+        page_listings = _parse_hepsiemlak_cards(soup, source_prefix="he", base_url="https://www.hepsiemlak.com")
+        for listing in page_listings:
+            if listing.listing_id in seen_ids:
+                continue
+            seen_ids.add(listing.listing_id)
+            if not _criteria_maybe_matches(listing, criteria):
+                continue
+            listings.append(listing)
+
     logging.info("Hepsiemlak kart parse sonucu: %s", len(listings))
     if not listings:
         _set_hepsiemlak_status("parse_empty", "Hepsiemlak sayfasi acildi ama ilan karti parse edilemedi.")
-    listings = await asyncio.to_thread(_enrich_hepsiemlak_details_sync, listings)
+    listings = await asyncio.to_thread(_enrich_hepsiemlak_details_sync, listings, criteria)
 
     if listings:
         _set_hepsiemlak_status("ok")
@@ -841,8 +1252,8 @@ async def fetch_listings(criteria: dict) -> list[ListingModel]:
 
     tasks = []
     for district in districts:
-        tasks.append(_fetch_emlakjet(city, district, listing_type, property_type, min_price, max_price))
-        tasks.append(_fetch_hepsiemlak(city, district, listing_type, property_type, min_price, max_price))
+        tasks.append(_fetch_emlakjet(city, district, listing_type, property_type, min_price, max_price, criteria))
+        tasks.append(_fetch_hepsiemlak(city, district, listing_type, property_type, min_price, max_price, criteria))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 

@@ -147,19 +147,13 @@ def apply_basic_filters(listings: list[ListingModel], criteria: dict) -> list[Li
             if building_age is None or building_age > int(max_building_age):
                 continue
 
-        listing_text = _listing_text(listing)
-
         if is_furnished is not None:
-            listing_furnished = listing.is_furnished
-            if listing_furnished is None:
-                listing_furnished = _detect_furnished(listing_text)
-            if listing_furnished != is_furnished:
+            if listing.is_furnished != is_furnished:
                 continue
 
         if seller_type:
             expected_seller = _normalize_text(str(seller_type))
-            listing_seller = listing.seller_type or _detect_seller_type(listing_text)
-            listing_seller = _normalize_text(str(listing_seller or ""))
+            listing_seller = _normalize_text(str(listing.seller_type or ""))
 
             if expected_seller == "sahibinden" and listing_seller != "sahibinden":
                 continue
