@@ -103,8 +103,8 @@ def _parse_building_age(value: str):
     return int(match.group(0)) if match else None
 
 
-def apply_basic_filters(listings: list[ListingModel], criteria: dict) -> list[ListingModel]:
-    filtered = []
+def _evaluate_listing(listing: ListingModel, criteria: dict) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
 
     min_price = criteria.get("min_price")
     max_price = criteria.get("max_price")
@@ -115,51 +115,88 @@ def apply_basic_filters(listings: list[ListingModel], criteria: dict) -> list[Li
     is_furnished = criteria.get("is_furnished")
     seller_type = criteria.get("seller_type")
 
-    for listing in listings:
-        if (min_price or max_price) and not listing.price:
-            continue
+    if (min_price or max_price) and not listing.price:
+        return False, ["fiyat_bilgisi_yok"]
 
-        if min_price and listing.price < min_price:
-            continue
+    if min_price and listing.price < min_price:
+        return False, [f"fiyat_min_alti({listing.price}<{min_price})"]
 
-        if max_price and listing.price > max_price:
-            continue
+    if max_price and listing.price > max_price:
+        return False, [f"fiyat_max_ustu({listing.price}>{max_price})"]
 
-        if district:
-            if not listing.district:
-                continue
-            allowed_districts = [_normalize_text(d.strip()) for d in district.split(",")]
-            listing_district = _normalize_text(listing.district)
-            if not any(d and d in listing_district for d in allowed_districts):
-                continue
+    if district:
+        if not listing.district:
+            return False, ["ilce_bilgisi_yok"]
+        allowed_districts = [_normalize_text(d.strip()) for d in district.split(",")]
+        listing_district = _normalize_text(listing.district)
+        if not any(d and d in listing_district for d in allowed_districts):
+            return False, [f"ilce_uyusmuyor({listing.district})"]
 
-        if min_rooms or max_rooms:
-            rooms = _parse_room_number(listing.room_count or "")
-            if rooms is None:
-                continue
+    if min_rooms or max_rooms:
+        rooms = _parse_room_number(listing.room_count or "")
+        if rooms is not None:
             if min_rooms and rooms < float(min_rooms):
-                continue
+                return False, [f"oda_min_alti({rooms}<{min_rooms})"]
             if max_rooms and rooms > float(max_rooms):
-                continue
+                return False, [f"oda_max_ustu({rooms}>{max_rooms})"]
+        else:
+            reasons.append("oda_bilgisi_parse_edilemedi_elenmedi")
 
-        if max_building_age is not None:
-            building_age = _parse_building_age(listing.building_age or "")
-            if building_age is None or building_age > int(max_building_age):
-                continue
+    if max_building_age is not None:
+        building_age = _parse_building_age(listing.building_age or "")
+        if building_age is not None and building_age > int(max_building_age):
+            return False, [f"bina_yasi_max_ustu({building_age}>{max_building_age})"]
+        if building_age is None:
+            reasons.append("bina_yasi_parse_edilemedi_elenmedi")
 
-        if is_furnished is not None:
-            if listing.is_furnished != is_furnished:
-                continue
+    if is_furnished is not None and listing.is_furnished is not None:
+        if listing.is_furnished != is_furnished:
+            return False, [f"esyali_uyusmuyor({listing.is_furnished}!={is_furnished})"]
+    elif is_furnished is not None and listing.is_furnished is None:
+        reasons.append("esyali_bilgisi_yok_elenmedi")
 
-        if seller_type:
-            expected_seller = _normalize_text(str(seller_type))
-            listing_seller = _normalize_text(str(listing.seller_type or ""))
+    if seller_type and listing.seller_type:
+        expected_seller = _normalize_text(str(seller_type))
+        listing_seller = _normalize_text(listing.seller_type)
 
-            if expected_seller == "sahibinden" and listing_seller != "sahibinden":
-                continue
-            if expected_seller == "emlak" and listing_seller != "emlak":
-                continue
+        if expected_seller == "sahibinden" and listing_seller != "sahibinden":
+            return False, [f"satici_uyusmuyor({listing.seller_type}!=sahibinden)"]
+        if expected_seller == "emlak" and listing_seller != "emlak":
+            return False, [f"satici_uyusmuyor({listing.seller_type}!=emlak)"]
+    elif seller_type and not listing.seller_type:
+        reasons.append("satici_bilgisi_yok_elenmedi")
 
-        filtered.append(listing)
+    if not reasons:
+        reasons = ["uygun"]
+    return True, reasons
 
+
+def build_filter_debug_rows(listings: list[ListingModel], criteria: dict) -> list[dict]:
+    rows: list[dict] = []
+    for listing in listings:
+        matched, reasons = _evaluate_listing(listing, criteria)
+        rows.append(
+            {
+                "matched": matched,
+                "reasons": reasons,
+                "listing_id": listing.listing_id,
+                "title": listing.title,
+                "price": listing.price,
+                "district": listing.district,
+                "room_count": listing.room_count,
+                "building_age": listing.building_age,
+                "is_furnished": listing.is_furnished,
+                "seller_type": listing.seller_type,
+                "url": listing.url,
+            }
+        )
+    return rows
+
+
+def apply_basic_filters(listings: list[ListingModel], criteria: dict) -> list[ListingModel]:
+    filtered = []
+    for listing in listings:
+        matched, _ = _evaluate_listing(listing, criteria)
+        if matched:
+            filtered.append(listing)
     return filtered
