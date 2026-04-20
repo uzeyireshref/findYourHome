@@ -50,9 +50,18 @@ async def _ensure_search_criteria_columns():
         if "property_type" not in existing_columns:
             await conn.execute(text("ALTER TABLE search_criteria ADD COLUMN property_type VARCHAR"))
 
+
+async def _ensure_runtime_indexes():
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_seen_listings_user_listing "
+            "ON seen_listings (user_id, listing_id)"
+        ))
+
 async def init_db():
     from db import models  # noqa: F401 - register SQLAlchemy models before create_all
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _ensure_search_criteria_columns()
+    await _ensure_runtime_indexes()

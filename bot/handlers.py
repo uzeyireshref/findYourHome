@@ -1,6 +1,5 @@
 import html
 import logging
-import random
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -162,7 +161,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hepsiemlak_status = get_source_status().get("hepsiemlak", {})
 
         filtered_listings = apply_basic_filters(listings, criteria)
-        random.shuffle(filtered_listings)
         preview_listings = filtered_listings[:MAX_INITIAL_LISTINGS]
 
         ej_filtered = len([l for l in filtered_listings if l.listing_id.startswith("ej_")])

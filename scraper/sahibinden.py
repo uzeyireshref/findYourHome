@@ -80,11 +80,11 @@ def _env_int(name: str, default: int, minimum: int = 1, maximum: int = 10) -> in
 
 
 def _max_pages() -> int:
-    return _env_int("SCRAPER_MAX_PAGES", 5, minimum=1, maximum=10)
+    return _env_int("SCRAPER_MAX_PAGES", 10, minimum=1, maximum=30)
 
 
 def _detail_limit() -> int:
-    return _env_int("SCRAPER_DETAIL_LIMIT", 120, minimum=10, maximum=300)
+    return _env_int("SCRAPER_DETAIL_LIMIT", 300, minimum=10, maximum=1000)
 
 _TR_TRANSLATION = str.maketrans({
     "\u00c7": "c", "\u00e7": "c",
@@ -96,14 +96,15 @@ _TR_TRANSLATION = str.maketrans({
 })
 
 
-def _normalize_text(text: str) -> str:
+def _normalize_text(text: str, append_repaired: bool = True) -> str:
     text = text or ""
-    try:
-        repaired = text.encode("latin1").decode("utf-8")
-        if repaired != text:
-            text = f"{text} {repaired}"
-    except UnicodeError:
-        pass
+    if append_repaired:
+        try:
+            repaired = text.encode("latin1").decode("utf-8")
+            if repaired != text:
+                text = f"{text} {repaired}"
+        except UnicodeError:
+            pass
 
     text = text.translate(_TR_TRANSLATION)
     text = unicodedata.normalize("NFKD", text)
@@ -112,7 +113,7 @@ def _normalize_text(text: str) -> str:
 
 
 def _normalize_slug(text: str) -> str:
-    normalized = _normalize_text(text)
+    normalized = _normalize_text(text, append_repaired=False)
     normalized = re.sub(r"[^a-z0-9\s-]", "", normalized)
     return normalized.replace(" ", "-")
 
@@ -232,7 +233,11 @@ def _emlakjet_room_filter_values(criteria: dict | None) -> list[str]:
     upper = max(lower, min(upper, 6))
 
     # Emlakjet URL filtrelerinde oda değerleri "2-1" => "2+1" formatında çalışıyor.
-    return [f"{room}-1" for room in range(lower, upper + 1)]
+    return [
+        f"{room}-{salon}"
+        for room in range(lower, upper + 1)
+        for salon in range(0, 3)
+    ]
 
 
 def _emlakjet_search_url(base_url: str, criteria: dict | None) -> str:
@@ -255,11 +260,10 @@ def _emlakjet_search_url(base_url: str, criteria: dict | None) -> str:
 
     min_price = criteria.get("min_price")
     max_price = criteria.get("max_price")
-    if params:
-        if min_price:
-            params.append(("min-fiyat", str(int(float(min_price)))))
-        if max_price:
-            params.append(("max-fiyat", str(int(float(max_price)))))
+    if min_price:
+        params.append(("min-fiyat", str(int(float(min_price)))))
+    if max_price:
+        params.append(("max-fiyat", str(int(float(max_price)))))
 
     return _add_query_params(base_url, params)
 
@@ -460,10 +464,27 @@ def _needs_detail(listing: ListingModel, criteria: dict | None) -> bool:
         ((criteria.get("min_price") or criteria.get("max_price")) and not listing.price)
         or (criteria.get("district") and not listing.district)
         or ((criteria.get("min_rooms") or criteria.get("max_rooms")) and not listing.room_count)
-        or criteria.get("is_furnished") is not None
+        or (criteria.get("is_furnished") is not None and listing.is_furnished is None)
         or bool(criteria.get("seller_type") and not listing.seller_type)
         or bool(criteria.get("max_building_age") is not None)
     )
+
+
+def _apply_emlakjet_server_assertions(listing: ListingModel, criteria: dict | None) -> ListingModel:
+    criteria = criteria or {}
+    updates = {}
+
+    # Emlakjet supports these filters directly in the search URL. If the card
+    # does not expose the same field, keep the server-side constraint instead
+    # of dropping otherwise valid listings before detail enrichment.
+    if criteria.get("is_furnished") is not None and listing.is_furnished is None:
+        updates["is_furnished"] = criteria["is_furnished"]
+
+    seller_type = _normalize_text(str(criteria.get("seller_type") or ""))
+    if seller_type in {"sahibinden", "emlak"} and not listing.seller_type:
+        updates["seller_type"] = seller_type
+
+    return listing.model_copy(update=updates) if updates else listing
 
 
 def _parse_hepsiemlak_cards(
@@ -496,6 +517,7 @@ def _parse_hepsiemlak_cards(
 
         size_el = card_root.find(class_="list-view-size") or a_tag.find(class_="list-view-size")
         size_text = size_el.get_text(separator=" | ", strip=True) if size_el else ""
+        card_text = card_root.get_text(" | ", strip=True)
         if not title:
             title = _title_from_url(full_url)
 
@@ -507,8 +529,8 @@ def _parse_hepsiemlak_cards(
             district=location,
             room_count=room_count,
             url=full_url,
-            is_furnished=None,
-            seller_type=None,
+            is_furnished=_detect_furnished(card_text),
+            seller_type=_detect_seller_type(card_text),
         ))
 
     return listings
@@ -578,6 +600,24 @@ def _emlakjet_seller_type(record: dict):
     if owner_type in {"corporate", "company", "office", "emlak"}:
         return "emlak"
     return _detect_seller_type(str(owner.get("name") or ""))
+
+
+def _emlakjet_furnished_from_record(record: dict):
+    furniture_value = _quick_info_value(record, "furnished", "Esya Durumu")
+    if not furniture_value:
+        furniture_value = _quick_info_value(record, "furniture_status", "Esya Durumu")
+    if furniture_value:
+        return _detect_furnished(furniture_value)
+
+    haystack = " ".join(
+        str(value or "")
+        for value in (
+            record.get("title"),
+            record.get("description"),
+            record.get("descriptionText"),
+        )
+    )
+    return _detect_furnished(haystack)
 
 
 def _fetch_unlocker_html_sync(url: str, client: httpx.Client | None = None) -> str:
@@ -660,7 +700,7 @@ def _parse_emlakjet_listing_card(html: str) -> list[ListingModel]:
                 district=str(record.get("locationSummary") or ""),
                 room_count=room_count,
                 url=full_url,
-                is_furnished=None,
+                is_furnished=_emlakjet_furnished_from_record(record),
                 seller_type=_emlakjet_seller_type(record),
             )
         )
@@ -971,6 +1011,7 @@ async def _fetch_emlakjet(
 
                 new_count = 0
                 for listing in page_listings:
+                    listing = _apply_emlakjet_server_assertions(listing, criteria)
                     if listing.listing_id in seen_ids:
                         continue
                     seen_ids.add(listing.listing_id)
@@ -1261,14 +1302,12 @@ async def _fetch_hepsiemlak(
     seller_suffix = "-sahibinden" if seller_type == "sahibinden" else ""
     base_urls = [
         f"https://www.hepsiemlak.com/{location_slug}-{listing_type}{seller_suffix}/{property_segment}",
-        f"https://www.hepsiemlak.com/{listing_type}-konut/{location_slug}",
         f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}{seller_suffix}/{property_segment}",
         f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}{seller_suffix}",
     ]
     if seller_suffix:
         base_urls.extend([
             f"https://www.hepsiemlak.com/{location_slug}-{listing_type}/{property_segment}",
-            f"https://www.hepsiemlak.com/{listing_type}-konut/{location_slug}",
             f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}/{property_segment}",
             f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}",
         ])

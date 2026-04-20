@@ -1,4 +1,4 @@
-from sqlalchemy import BigInteger, Column, Integer, String, Float, Boolean, DateTime, ForeignKey
+from sqlalchemy import BigInteger, Column, Integer, String, Float, Boolean, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from db.database import Base
@@ -37,6 +37,10 @@ class SearchCriteria(Base):
 
 class SeenListing(Base):
     __tablename__ = "seen_listings"
+    __table_args__ = (
+        UniqueConstraint("user_id", "listing_id", name="uq_seen_listings_user_listing"),
+    )
+
     id = Column(Integer, primary_key=True, index=True)
     listing_id = Column(String, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))

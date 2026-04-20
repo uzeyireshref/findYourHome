@@ -42,6 +42,8 @@ async def check_if_listing_seen(session: AsyncSession, user_id: int, listing_id:
     return result.scalar_one_or_none() is not None
 
 async def mark_listing_as_seen(session: AsyncSession, user_id: int, listing_id: str):
+    if await check_if_listing_seen(session, user_id, listing_id):
+        return
     seen = SeenListing(user_id=user_id, listing_id=listing_id)
     session.add(seen)
     await session.commit()

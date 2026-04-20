@@ -9,10 +9,15 @@ from filters.basic import apply_basic_filters
 from gemini.analyzer import analyze_listing_with_gemini
 from notifications.sender import send_new_listing_notification
 
-MIN_GEMINI_SCORE = int(os.getenv("MIN_GEMINI_SCORE", "60"))
-
 from sqlalchemy.future import select
 from db.models import User
+
+
+def _min_gemini_score() -> int:
+    try:
+        return int(os.getenv("MIN_GEMINI_SCORE", "60"))
+    except ValueError:
+        return 60
 
 async def run_scraper_job(context):
     bot: ExtBot = context.bot
@@ -71,7 +76,7 @@ async def run_scraper_job(context):
                 ozet = analysis.get("ozet", "(Bağlantıya tıklayarak detayları kontrol ediniz)")
                 
                 # 4. Bildirim koşulları sağlanıyorsa Telegram'a gönder
-                if uygun and skor >= MIN_GEMINI_SCORE:
+                if uygun and skor >= _min_gemini_score():
                     success = await send_new_listing_notification(bot, chat_id=telegram_id, listing=listing, analysis_summary=ozet)
                     if success:
                         await log_notification(session, user_id=user_id, listing_id=listing.listing_id, summary=ozet)

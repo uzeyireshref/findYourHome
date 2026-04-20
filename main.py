@@ -32,7 +32,7 @@ async def post_init(application):
     scheduler.add_job(
         run_scraper_job,
         'cron',
-        hour='8,11,14,17,20',
+        hour='*/5',
         args=[application]
     )
     scheduler.start()
