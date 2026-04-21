@@ -1366,7 +1366,7 @@ async def _fetch_hepsiemlak(
     return listings
 
 
-async def fetch_listings(criteria: dict) -> list[ListingModel]:
+async def fetch_listings(criteria: dict, debug_mode: bool = False) -> list[ListingModel]:
     city = criteria.get("city", "istanbul") or "istanbul"
     district_raw = criteria.get("district", "") or ""
     districts = [d.strip() for d in district_raw.split(",") if d.strip()]

@@ -152,7 +152,7 @@ def _write_html_report(criteria: dict, rows: list[dict], html_out: str) -> None:
 
 
 async def _run(criteria: dict, limit: int | None, html_out: str | None) -> None:
-    listings = await fetch_listings(criteria)
+    listings = await fetch_listings(criteria, debug_mode=True)
     rows = build_filter_debug_rows(listings, criteria)
 
     print(f"\n=== HAM TOPLAM: {len(rows)} ===")
