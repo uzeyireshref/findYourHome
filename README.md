@@ -46,7 +46,14 @@ TELEGRAM_BOT_TOKEN=
 GEMINI_API_KEY=
 DATABASE_URL=sqlite+aiosqlite:///./emlak.db
 MIN_GEMINI_SCORE=60
+HEPSIEMLAK_PROXY=
+BRIGHTDATA_API_KEY=
+BRIGHTDATA_UNLOCKER_ZONE=web_unlocker1
 ```
+
+Hepsiemlak notu:
+- Bazi cloud IP bloklarinda Hepsiemlak 403 donebilir.
+- Bu durumda `HEPSIEMLAK_PROXY` veya `BRIGHTDATA_API_KEY` tanimlanmazsa Hepsiemlak'tan ilan gelmeyebilir.
 
 ## Kurulum
 

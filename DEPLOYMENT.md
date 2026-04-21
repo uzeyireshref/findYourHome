@@ -64,7 +64,14 @@ TELEGRAM_BOT_TOKEN=...
 GEMINI_API_KEY=...
 DATABASE_URL=postgresql://...
 MIN_GEMINI_SCORE=60
+HEPSIEMLAK_PROXY=
+BRIGHTDATA_API_KEY=
+BRIGHTDATA_UNLOCKER_ZONE=web_unlocker1
 ```
+
+Not:
+- Google Cloud gibi ortamlarda Hepsiemlak 403 ile origin IP engeli uygulayabilir.
+- Bu durumda `HEPSIEMLAK_PROXY` veya `BRIGHTDATA_API_KEY` tanimlayin.
 
 ### Alternatif: Cloud Run
 

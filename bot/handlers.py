@@ -181,9 +181,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Hepsiemlak: <b>{he_count}</b> ilan çekildi → <b>{he_filtered}</b> uygun"
         )
         if he_count == 0 and hepsiemlak_status.get("state") == "blocked":
+            blocked_reason = html.escape(
+                str(
+                    hepsiemlak_status.get("message")
+                    or "Hepsiemlak erisim engeli nedeniyle ilan donmedi."
+                )
+            )
             hepsiemlak_line = (
                 "• Hepsiemlak: <b>erişim engellendi</b> "
-                "(Google Cloud IP 403 alıyor)"
+                f"({blocked_reason})"
             )
 
         stats_msg = (

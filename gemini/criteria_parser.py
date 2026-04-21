@@ -4,7 +4,7 @@ import re
 import unicodedata
 from typing import Optional
 
-import google.generativeai as genai
+from google import genai
 from pydantic import BaseModel, Field
 
 
@@ -157,7 +157,7 @@ async def parse_user_request(text_input: str) -> dict:
     if not os.getenv("GEMINI_API_KEY"):
         raise ValueError("GEMINI_API_KEY is not set.")
 
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
     prompt = f"""
 Analyze this Turkish real estate search request and return only a JSON object.
@@ -182,8 +182,10 @@ Schema:
 User text: "{text_input}"
 """
 
-    model = genai.GenerativeModel("gemini-2.5-flash")
-    response = await model.generate_content_async(prompt)
+    response = await client.aio.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
+    )
 
     cleaned_res = response.text.strip()
     if cleaned_res.startswith("```json"):

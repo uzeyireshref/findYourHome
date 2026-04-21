@@ -7,5 +7,5 @@ SQLAlchemy
 aiosqlite
 asyncpg
 pydantic
-google-generativeai
+google-genai
 python-dotenv

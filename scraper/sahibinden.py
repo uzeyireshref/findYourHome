@@ -72,6 +72,33 @@ def _brightdata_unlocker_config() -> tuple[str, str]:
     return api_key, zone
 
 
+def _hepsiemlak_blocked_message() -> str:
+    proxy_configured = bool(os.getenv("HEPSIEMLAK_PROXY", "").strip())
+    unlocker_configured = bool(_brightdata_unlocker_config()[0])
+    if proxy_configured or unlocker_configured:
+        return "Hepsiemlak origin IP engeli tespit edildi; proxy/unlocker ile tekrar denendi."
+    return "Hepsiemlak origin IP engeli nedeniyle erisilemedi. HEPSIEMLAK_PROXY veya BRIGHTDATA_API_KEY ayarlayin."
+
+
+def _is_hepsiemlak_html(content: str) -> bool:
+    text = content or ""
+    if len(text) < 5_000:
+        return False
+
+    lowered = text.lower()
+    if "403 forbidden" in lowered or "access denied" in lowered:
+        return False
+
+    markers = (
+        "__next_data__",
+        "listing-card",
+        "property-card",
+        "search-results",
+        "hepsiemlak",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 def _env_int(name: str, default: int, minimum: int = 1, maximum: int = 10) -> int:
     try:
         value = int(os.getenv(name, str(default)))
@@ -321,7 +348,8 @@ def _add_query_params(url: str, params: list[tuple[str, str]]) -> str:
     parts = urlsplit(url)
     query = parse_qsl(parts.query, keep_blank_values=True)
     query.extend((key, value) for key, value in params if value not in (None, ""))
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+    # urlencode safe="=," prevents encoding `=` and `,` which Emlakjet requires for `filtreler`
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query, safe="=,"), parts.fragment))
 
 
 def _title_from_url(url: str) -> str:
@@ -1035,7 +1063,7 @@ def _fetch_hepsiemlak_sync(urls: list[str]) -> str:
                         attempt,
                         url,
                     )
-                    if response.status_code == 200:
+                    if response.status_code == 200 and _is_hepsiemlak_html(response.text):
                         _set_hepsiemlak_status("ok")
                         logging.info("Hepsiemlak cevap verdi: %s", url)
                         return response.text
@@ -1043,7 +1071,7 @@ def _fetch_hepsiemlak_sync(urls: list[str]) -> str:
                     if response.status_code == 403:
                         _set_hepsiemlak_status(
                             "blocked",
-                            "Hepsiemlak Google Cloud VM IP adresinden gelen istekleri 403 ile engelliyor.",
+                            _hepsiemlak_blocked_message(),
                         )
 
                     logging.warning("Hepsiemlak HTTP %s (%s)", response.status_code, url)
@@ -1067,12 +1095,14 @@ async def _fetch_hepsiemlak_httpx_fallback(urls: list[str]) -> str:
                     url,
                 )
                 if response.status_code == 200 and body_size > 50_000:
+                    if not _is_hepsiemlak_html(response.text):
+                        continue
                     _set_hepsiemlak_status("ok")
                     return response.text
                 if response.status_code == 403:
                     _set_hepsiemlak_status(
                         "blocked",
-                        "Hepsiemlak Google Cloud VM IP adresinden gelen istekleri 403 ile engelliyor.",
+                        _hepsiemlak_blocked_message(),
                     )
             except Exception as e:
                 logging.warning("Hepsiemlak httpx fallback hatasi (%s): %s", url, e)
@@ -1109,7 +1139,7 @@ async def _fetch_hepsiemlak_unlocker_api(urls: list[str]) -> str:
                     url,
                 )
 
-                if response.status_code == 200 and body_size > 50_000:
+                if response.status_code == 200 and _is_hepsiemlak_html(response.text):
                     _set_hepsiemlak_status("ok")
                     return response.text
 
@@ -1156,12 +1186,12 @@ def _fetch_hepsiemlak_sync_pages(urls: list[str]) -> list[str]:
                 body_size,
                 url,
             )
-            if response.status_code == 200 and body_size > 20_000:
+            if response.status_code == 200 and _is_hepsiemlak_html(response.text):
                 pages.append(response.text)
             elif response.status_code == 403:
                 _set_hepsiemlak_status(
                     "blocked",
-                    "Hepsiemlak Google Cloud VM IP adresinden gelen istekleri 403 ile engelliyor.",
+                    _hepsiemlak_blocked_message(),
                 )
         except Exception as e:
             logging.warning("Hepsiemlak sayfa istek hatasi (%s): %s", url, e)
@@ -1182,12 +1212,12 @@ async def _fetch_hepsiemlak_httpx_fallback_pages(urls: list[str]) -> list[str]:
                     body_size,
                     url,
                 )
-                if response.status_code == 200 and body_size > 20_000:
+                if response.status_code == 200 and _is_hepsiemlak_html(response.text):
                     pages.append(response.text)
                 elif response.status_code == 403:
                     _set_hepsiemlak_status(
                         "blocked",
-                        "Hepsiemlak Google Cloud VM IP adresinden gelen istekleri 403 ile engelliyor.",
+                        _hepsiemlak_blocked_message(),
                     )
             except Exception as e:
                 logging.warning("Hepsiemlak httpx sayfa fallback hatasi (%s): %s", url, e)
@@ -1224,7 +1254,7 @@ async def _fetch_hepsiemlak_unlocker_api_pages(urls: list[str]) -> list[str]:
                     zone,
                     url,
                 )
-                if response.status_code == 200 and body_size > 20_000:
+                if response.status_code == 200 and _is_hepsiemlak_html(response.text):
                     pages.append(response.text)
                 elif response.status_code in {401, 403}:
                     _set_hepsiemlak_status(
@@ -1259,17 +1289,26 @@ async def _fetch_hepsiemlak(
     property_segment = _hepsiemlak_property_segment(property_type)
     seller_type = _normalize_text(str((criteria or {}).get("seller_type") or ""))
     seller_suffix = "-sahibinden" if seller_type == "sahibinden" else ""
-    base_urls = [
-        f"https://www.hepsiemlak.com/{location_slug}-{listing_type}{seller_suffix}/{property_segment}",
-        f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}{seller_suffix}/{property_segment}",
-        f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}{seller_suffix}",
+    
+    location_candidates = [
+        location_slug,   # city-district
+        district_slug,   # district
+        legacy_slug,     # legacy behavior
+        city_slug,       # city
     ]
-    if seller_suffix:
+    location_candidates = [value for value in dict.fromkeys(location_candidates) if value]
+
+    base_urls = []
+    for candidate in location_candidates:
         base_urls.extend([
-            f"https://www.hepsiemlak.com/{location_slug}-{listing_type}/{property_segment}",
-            f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}/{property_segment}",
-            f"https://www.hepsiemlak.com/{legacy_slug}-{listing_type}",
+            f"https://www.hepsiemlak.com/{candidate}-{listing_type}{seller_suffix}/{property_segment}",
+            f"https://www.hepsiemlak.com/{candidate}-{listing_type}{seller_suffix}",
         ])
+        if seller_suffix:
+            base_urls.extend([
+                f"https://www.hepsiemlak.com/{candidate}-{listing_type}/{property_segment}",
+                f"https://www.hepsiemlak.com/{candidate}-{listing_type}",
+            ])
     base_urls = list(dict.fromkeys(_hepsiemlak_search_url(url, criteria) for url in base_urls))
     urls = [
         _with_page(base_url, page, "page")
