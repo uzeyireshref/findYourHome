@@ -931,6 +931,7 @@ async def _fetch_emlakjet(
     min_price: float = None,
     max_price: float = None,
     criteria: dict | None = None,
+    debug_mode: bool = False,
 ) -> list[ListingModel]:
     city_slug = _normalize_slug(city)
     category_segment = _emlakjet_category_segment(listing_type, property_type)
@@ -1002,7 +1003,7 @@ async def _fetch_emlakjet(
                     if listing.listing_id in seen_ids:
                         continue
                     seen_ids.add(listing.listing_id)
-                    if not _criteria_maybe_matches(listing, criteria):
+                    if not debug_mode and not _criteria_maybe_matches(listing, criteria):
                         continue
                     listings.append(listing)
                     new_count += 1
@@ -1280,6 +1281,7 @@ async def _fetch_hepsiemlak(
     min_price: float = None,
     max_price: float = None,
     criteria: dict | None = None,
+    debug_mode: bool = False,
 ) -> list[ListingModel]:
     _set_hepsiemlak_status("checking")
     city_slug = _normalize_slug(city)
@@ -1351,7 +1353,7 @@ async def _fetch_hepsiemlak(
             if listing.listing_id in seen_ids:
                 continue
             seen_ids.add(listing.listing_id)
-            if not _criteria_maybe_matches(listing, criteria):
+            if not debug_mode and not _criteria_maybe_matches(listing, criteria):
                 continue
             listings.append(listing)
 
@@ -1380,8 +1382,8 @@ async def fetch_listings(criteria: dict, debug_mode: bool = False) -> list[Listi
 
     tasks = []
     for district in districts:
-        tasks.append(_fetch_emlakjet(city, district, listing_type, property_type, min_price, max_price, criteria))
-        tasks.append(_fetch_hepsiemlak(city, district, listing_type, property_type, min_price, max_price, criteria))
+        tasks.append(_fetch_emlakjet(city, district, listing_type, property_type, min_price, max_price, criteria, debug_mode))
+        tasks.append(_fetch_hepsiemlak(city, district, listing_type, property_type, min_price, max_price, criteria, debug_mode))
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
