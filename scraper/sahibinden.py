@@ -1411,19 +1411,19 @@ async def fetch_listings(criteria: dict, debug_mode: bool = False) -> list[Listi
 
     # --- TOPLU AI ANALIZI ---
     if unique_listings:
-        batch_size = 15 # Tek seferde 15 ilan gonder (AI zekasi ve token limiti dengesi)
-        all_approved = []
+        batch_size = 15
         listings_dicts = [l.model_dump() for l in unique_listings]
+        approved_ids = set()
         
-        # Paralel degil sirali (veya kucuk paralel) gondererek API limitlerini koruyoruz
         for i in range(0, len(listings_dicts), batch_size):
             batch = listings_dicts[i : i + batch_size]
-            approved_batch_dicts = await analyze_listings_batch(batch, criteria)
-            for d in approved_batch_dicts:
-                try:
-                    all_approved.append(ListingModel(**d))
-                except:
-                    continue
+            approved_batch = await analyze_listings_batch(batch, criteria)
+            # Sadece onaylanan ID'leri topla
+            for item in approved_batch:
+                approved_ids.add(str(item.get('listing_id')))
+        
+        # Orijinal objeleri bozmadan ID uzerinden filtrele
+        all_approved = [l for l in unique_listings if str(l.listing_id) in approved_ids]
         
         logging.info(f"Final Sonuc: {len(unique_listings)} adaydan {len(all_approved)} tanesi AI süzgecinden gecti.")
         return all_approved
