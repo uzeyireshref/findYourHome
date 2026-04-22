@@ -34,9 +34,14 @@ async def analyze_listings_batch(listings: List[Dict], criteria: Dict) -> List[D
         )
 
     prompt = f"""
-Analyze these Turkish real estate listings based on the user's criteria. 
-Identify which listings are a match. Be smart: if room count isn't explicitly in the field but is mentioned in the description, count it.
-Ignore listings that clearly violate price or location criteria.
+Analyze these Turkish real estate listings. You are a STRICT filter. 
+Only approve listings that CLEARLY meet ALL criteria. 
+
+CRITICAL RULES:
+1. If the price is above the max_price, REJECT immediately.
+2. If room count is explicitly different (e.g., user wants 3+1 but it's 1+1), REJECT.
+3. If unsure, REJECT. Better to miss a listing than to send a wrong one.
+4. Check the description carefully for hidden details (e.g., 'not for students', 'needs renovation').
 
 USER CRITERIA:
 {json.dumps(criteria, ensure_ascii=False, indent=2)}
@@ -44,8 +49,7 @@ USER CRITERIA:
 LISTINGS TO ANALYZE:
 {listings_text}
 
-Response must be ONLY a JSON object with the list of suitable IDs. 
-Example: {{"suitable_ids": ["ej_123", "he_456"]}}
+Return ONLY a JSON object: {{"suitable_ids": ["id1", "id2"]}}
 """
 
     try:
