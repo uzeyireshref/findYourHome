@@ -52,34 +52,24 @@ async def run_scraper_job(context):
                 "extra_notes": criteria_db.extra_notes
             }
             
-            # 1. Sahibinden'den ham listeyi çek
+            # 1. Sahibinden'den AI onaylı listeyi çek (Zaten filtreli geliyor)
             listings = await fetch_listings(criteria_dict)
             
-            # 2. Fiyat, oda, ilçe gibi temel mekanik filtreler
-            filtered_listings = apply_basic_filters(listings, criteria_dict)
-            
-            for listing in filtered_listings:
+            for listing in listings:
                 # Daha önce gönderilmiş mi kontrol et
                 is_seen = await check_if_listing_seen(session, user_id=user_id, listing_id=listing.listing_id)
                 if is_seen:
                     continue
                 
-                # 3. Gemini ile semantik uygunluk değerlendirmesi
-                analysis = await analyze_listing_with_gemini(
-                    listing_title=listing.title,
-                    listing_details=listing.description or "Araştırılıyor (Açıklama detayı scraper'dan alınamadı)",
-                    extra_notes=criteria_db.extra_notes
-                )
+                # Zaten fetch_listings icinde AI toplu analizi yaptigimiz icin burada tekrar sormuyoruz.
+                # Direkt bildirim gonderiyoruz.
+                ozet = listing.description[:150] + "..." if listing.description else "(Detaylar icin tiklayiniz)"
                 
-                uygun = analysis.get("uygun", False)
-                skor = analysis.get("skor", 0)
-                ozet = analysis.get("ozet", "(Bağlantıya tıklayarak detayları kontrol ediniz)")
-                
-                # 4. Bildirim koşulları sağlanıyorsa Telegram'a gönder
-                if uygun and skor >= _min_gemini_score():
-                    success = await send_new_listing_notification(bot, chat_id=telegram_id, listing=listing, analysis_summary=ozet)
-                    if success:
-                        await log_notification(session, user_id=user_id, listing_id=listing.listing_id, summary=ozet)
-                        await mark_listing_as_seen(session, user_id=user_id, listing_id=listing.listing_id)
+                success = await send_new_listing_notification(bot, chat_id=telegram_id, listing=listing, analysis_summary=ozet)
+                if success:
+                    # Hemen isaretle
+                    await log_notification(session, user_id=user_id, listing_id=listing.listing_id, summary=ozet)
+                    await mark_listing_as_seen(session, user_id=user_id, listing_id=listing.listing_id)
+                    await session.commit() # Veritabani degisikligini hemen kaydet
 
     logging.info("Scraper job tamamlandı.")
