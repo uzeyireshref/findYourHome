@@ -11,6 +11,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from scraper.normalizer import ListingModel
+from gemini.listing_analyzer import analyze_listings_batch
 
 
 HEADERS = {
@@ -1404,7 +1405,27 @@ async def fetch_listings(criteria: dict, debug_mode: bool = False) -> list[Listi
     random.shuffle(unique_listings)
 
     logging.info(
-        "Toplam %s benzersiz ilan bulundu (Emlakjet + Hepsiemlak).",
+        "Toplam %s benzersiz aday ilan bulundu. AI toplu analizi baslatiliyor...",
         len(unique_listings),
     )
+
+    # --- TOPLU AI ANALIZI ---
+    if unique_listings:
+        batch_size = 15 # Tek seferde 15 ilan gonder (AI zekasi ve token limiti dengesi)
+        all_approved = []
+        listings_dicts = [l.model_dump() for l in unique_listings]
+        
+        # Paralel degil sirali (veya kucuk paralel) gondererek API limitlerini koruyoruz
+        for i in range(0, len(listings_dicts), batch_size):
+            batch = listings_dicts[i : i + batch_size]
+            approved_batch_dicts = await analyze_listings_batch(batch, criteria)
+            for d in approved_batch_dicts:
+                try:
+                    all_approved.append(ListingModel(**d))
+                except:
+                    continue
+        
+        logging.info(f"Final Sonuc: {len(unique_listings)} adaydan {len(all_approved)} tanesi AI süzgecinden gecti.")
+        return all_approved
+
     return unique_listings
